@@ -41,7 +41,7 @@ Thumbs.db
 output/
 output_cpu/
 CMS_Open_Payements2024/
-concurentCPU/printAllFiles.sh
+printAllFiles.sh
 all_contents.txt
 a_doc/
 *.parquet
@@ -65,4 +65,5 @@ CMS_Open_Payements2024/*.zip
 *.pickle
 *.h5
 *.hdf5
+.idea
 

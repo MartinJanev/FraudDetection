@@ -69,6 +69,9 @@ class CleanConfig:
     column_mapping: Optional[Dict[str, str]] = None
     max_workers: int = 1
     skip_rejected: bool = False
+    # Fractional sampling of canonicalized rows (1.0 = keep all)
+    sampling_fraction: float = 1.0
+    sampling_seed: Optional[int] = None
 
 
 def load_config(path: str) -> CleanConfig:
@@ -86,6 +89,8 @@ def load_config(path: str) -> CleanConfig:
         column_mapping=raw.get("column_mapping"),
         max_workers=int(raw.get("max_workers", 1)),
         skip_rejected=bool(raw.get("skip_rejected", False)),
+        sampling_fraction=float(raw.get("sampling", {}).get("fraction", 1.0)),
+        sampling_seed=raw.get("sampling", {}).get("seed"),
     )
 
 
@@ -260,6 +265,19 @@ def parse_date(x) -> Optional[str]:
 def stable_hash_hex(parts: Iterable[Optional[str]]) -> str:
     joined = "|".join("" if p is None else str(p) for p in parts)
     return hashlib.sha1(joined.encode("utf-8")).hexdigest()
+
+
+def sampling_mask_from_record_ids(record_ids: pd.Series, fraction: float, seed: Optional[int]) -> pd.Series:
+    """
+    Deterministic sampling mask based on record_id hash so results are stable across chunk sizes/runs.
+    """
+    if fraction >= 0.9999:
+        return pd.Series([True] * len(record_ids), index=record_ids.index)
+    salt = "" if seed is None else str(seed)
+    # Use SHA1 of record_id + salt and map to [0,1)
+    hashes = record_ids.astype(str).map(lambda rid: hashlib.sha1((rid + salt).encode("utf-8")).hexdigest())
+    values = hashes.map(lambda h: int(h[:15], 16) / float(16 ** 15))
+    return values < fraction
 
 
 # ---------------------------
@@ -840,6 +858,7 @@ def run(cfg: CleanConfig, config_path: str = None) -> None:
     rows_in = 0
     rows_valid = 0
     rows_rejected = 0
+    rows_after_sampling = 0
     amounts = []
     part_num = 0
 
@@ -854,7 +873,7 @@ def run(cfg: CleanConfig, config_path: str = None) -> None:
     manifest_clean = []
     manifest_rejected = []
 
-    logging.info("Starting Phase 1 clean. year=%s dataset_type=%s", cfg.program_year, cfg.dataset_type)
+    logging.info("Starting Phase 1 clean. year=%s dataset_type=%s sampling=%.3f seed=%s", cfg.program_year, cfg.dataset_type, cfg.sampling_fraction, cfg.sampling_seed)
 
     t_phase_start = time.perf_counter()
 
@@ -882,6 +901,13 @@ def run(cfg: CleanConfig, config_path: str = None) -> None:
         for chunk in tqdm(reader, total=total_chunks, desc=f"Processing {Path(fpath).name}", unit="chunk"):
             rows_in += len(chunk)
             canon = canonicalize_chunk(chunk, cfg, source_file=Path(fpath).name)
+
+            # Apply deterministic sampling before validity split
+            sample_mask = sampling_mask_from_record_ids(canon["record_id"], cfg.sampling_fraction, cfg.sampling_seed)
+            canon = canon.loc[sample_mask].reset_index(drop=True)
+            rows_after_sampling += len(canon)
+            if len(canon) == 0:
+                continue
 
             valid = canon[canon["is_valid"]].copy()
             rej = canon[~canon["is_valid"]].copy()
@@ -961,9 +987,18 @@ def run(cfg: CleanConfig, config_path: str = None) -> None:
         "dataset_type": cfg.dataset_type,
         "program_year": cfg.program_year,
         "rows_in": int(rows_in),
+        "rows_after_sampling": int(rows_after_sampling),
         "rows_valid": int(rows_valid),
         "rows_rejected": int(rows_rejected) if not cfg.skip_rejected else 0,
-        "valid_rate": float(rows_valid / rows_in) if rows_in else None,
+        "sampling": {
+            "fraction": float(cfg.sampling_fraction),
+            "seed": cfg.sampling_seed,
+            "enabled": cfg.sampling_fraction < 0.9999,
+            "rows_before_sampling": int(rows_in),
+            "rows_after_sampling": int(rows_after_sampling),
+            "retention_rate": float(rows_after_sampling / rows_in) if rows_in else None,
+        },
+        "valid_rate": float(rows_valid / rows_after_sampling) if rows_after_sampling else None,
         "amount_usd_stats": amt_stats,
 
         # Payee type breakdown
@@ -1092,6 +1127,8 @@ def run_from_pipeline(
         column_mapping=phase_cfg.get("column_mapping"),
         max_workers=int(phase_cfg.get("max_workers", phase_cfg.get("num_workers", 1))),
         skip_rejected=bool(phase_cfg.get("skip_rejected", True)),
+        sampling_fraction=float(phase_cfg.get("sampling", {}).get("fraction", 1.0)),
+        sampling_seed=phase_cfg.get("sampling", {}).get("seed"),
     )
 
     # Persist minimal phase config snapshot for fingerprinting
@@ -1104,6 +1141,8 @@ def run_from_pipeline(
         "write_format": cfg.write_format,
         "keep_source_file": cfg.keep_source_file,
         "column_mapping": cfg.column_mapping,
+        "sampling_fraction": cfg.sampling_fraction,
+        "sampling_seed": cfg.sampling_seed,
     }
     cfg_path = out_dir / "config_from_pipeline.yaml"
     with open(cfg_path, "w", encoding="utf-8") as f:

@@ -28,7 +28,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
-import numpy as np
 import pandas as pd
 import yaml
 
@@ -259,7 +258,7 @@ def compute_components(edges: pd.DataFrame, *, max_threads: int) -> pd.DataFrame
     g, nodes = _nk_build_graph(edges)
 
     # Weak components => undirected view
-    ug = nk.graphtools.toUndirected(g)
+    ug = nk.graphtools.toUndirected(type(g)) if isinstance(g, type) else nk.graphtools.toUndirected(g)
     cc = nk.components.ConnectedComponents(ug)
     cc.run()
 
@@ -289,15 +288,24 @@ def run(cfg: AlgoConfig) -> None:
         nk.setNumberOfThreads(int(cfg.max_threads))
         _maybe_set_dask_threads(int(cfg.max_threads))
 
+    edges_path = _edges_path(cfg.graph_dir)
+    print(f"[phase3_algos] graph_dir={cfg.graph_dir} | edges={edges_path}", flush=True)
+
+    if cfg.max_threads and cfg.max_threads > 0:
+        nk.setNumberOfThreads(cfg.max_threads)
+        print(f"[phase3_algos] NetworKit threads={nk.getMaxNumberOfThreads()}", flush=True)
+
     # --- Degree features (parallel if dask backend) ---
     t_deg_start = time.perf_counter()
     degrees_backend_used = cfg.degrees_backend
 
     if cfg.degrees_backend == "dask":
+        print(f"[phase3_algos] computing degrees via Dask (scheduler={cfg.dask_scheduler}, nparts={cfg.dask_npartitions or 'auto'})", flush=True)
         ddf_edges = load_edges_dask(cfg.graph_dir, npartitions=cfg.dask_npartitions)
         degrees = compute_degrees_dask(ddf_edges, scheduler=cfg.dask_scheduler)
         edges_count = int(ddf_edges.shape[0].compute())
     elif cfg.degrees_backend == "pandas":
+        print("[phase3_algos] computing degrees via pandas", flush=True)
         edges_pd = load_edges_pandas(cfg.graph_dir)
         edges_count = int(len(edges_pd))
         degrees = compute_degrees_pandas(edges_pd)
@@ -305,6 +313,8 @@ def run(cfg: AlgoConfig) -> None:
         raise ValueError("degrees_backend must be one of {'dask','pandas'}")
 
     t_deg = time.perf_counter() - t_deg_start
+
+    print(f"[phase3_algos] degree rows={len(degrees)}", flush=True)
 
     # --- Graph algorithms (NetworKit; require edges in-memory as pandas) ---
     # We re-read as pandas *only* with the columns needed for algorithms.
@@ -315,7 +325,9 @@ def run(cfg: AlgoConfig) -> None:
     logging.info("Loaded edges (pandas for NetworKit): %d", len(edges_pd))
 
     # Node count used in NetworKit (unique over src ∪ dst)
-    n_nodes = int(pd.unique(pd.concat([edges_pd["src"], edges_pd["dst"]], axis=0)).size)
+    src_series = edges_pd["src"] if isinstance(edges_pd["src"], pd.Series) else pd.Series(edges_pd["src"])
+    dst_series = edges_pd["dst"] if isinstance(edges_pd["dst"], pd.Series) else pd.Series(edges_pd["dst"])
+    n_nodes = int(pd.unique(pd.concat([src_series, dst_series], axis=0)).size)
 
     t_pr_start = time.perf_counter()
     pagerank_df = compute_pagerank(
@@ -392,6 +404,15 @@ def run(cfg: AlgoConfig) -> None:
     if comp_df is not None:
         logging.info("Wrote components: %s", components_path)
     logging.info("Wrote report: %s", report_path)
+
+    # After writing outputs
+    print(f"[phase3_algos] wrote degree -> {degrees_path}", flush=True)
+    print(f"[phase3_algos] wrote pagerank -> {pagerank_path}", flush=True)
+    if comp_df is not None:
+        print(f"[phase3_algos] wrote components -> {components_path}", flush=True)
+
+    print(f"[phase3_algos] stats degree_min={degrees['total_degree'].min()} degree_max={degrees['total_degree'].max()}", flush=True)
+    print(f"[phase3_algos] timings total={total_time:.2f}s", flush=True)
 
 
 def run_from_pipeline(

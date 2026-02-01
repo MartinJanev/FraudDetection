@@ -24,7 +24,6 @@ Design principles:
 from __future__ import annotations
 
 import argparse
-import json
 import logging
 import time
 from dataclasses import dataclass
@@ -35,6 +34,7 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 import yaml
+from dask.dataframe.io.parquet.core import apply_filters
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -240,9 +240,6 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
 
     df = df[df["node_type"].isin(score_types)].copy()
 
-    df = df[df["in_w"].fillna(0.0) >= cfg.min_in_w]
-    df = df[df["in_deg"].fillna(0).astype(int) >= cfg.min_in_deg]
-
     in_w = pd.to_numeric(df["in_w"], errors="coerce").fillna(0.0).to_numpy()
     in_deg = pd.to_numeric(df["in_deg"], errors="coerce").fillna(0.0).to_numpy()
     out_w = pd.to_numeric(df["out_w"], errors="coerce").fillna(0.0).to_numpy()
@@ -302,95 +299,49 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
     return df, stats
 
 
+def score_nodes(df, cfg):
+    scored, stats = score_table(df, cfg)
+    # persist stats for caller if needed
+    return scored
+
+
 def run(cfg: ScoreConfig) -> None:
     t0 = time.perf_counter()
-    ensure_dir(cfg.output_dir)
+    print(f"[phase4_score] graph_dir={cfg.graph_dir} | degree={cfg.degree_path or 'auto'} | pagerank={'on' if cfg.use_pagerank else 'off'}", flush=True)
 
-    # Default expected layout in the pipeline:
-    # phase3_algos/degree.parquet + optional phase3_algos/pagerank.parquet
-    degree_path = cfg.degree_path or str(Path(cfg.graph_dir) / "degree.parquet")
-
-    logging.info("Phase 4: Fraud Scoring")
-    logging.info("Scoring from degree: %s", degree_path)
-
-    if not Path(degree_path).exists():
+    degree_path = Path(cfg.degree_path) if cfg.degree_path else Path(cfg.graph_dir) / "degree.parquet"
+    if not degree_path.exists():
         raise FileNotFoundError(f"Degree file not found: {degree_path}")
 
     t_read0 = time.perf_counter()
-    deg = pd.read_parquet(degree_path)
+    df = pd.read_parquet(degree_path)
     t_read = time.perf_counter() - t_read0
-    logging.info("  Loaded %d rows from degree.parquet", len(deg))
+    print(f"[phase4_score] loaded degree rows={len(df)}", flush=True)
 
-    t_score0 = time.perf_counter()
-    scored, stats = score_table(deg, cfg)
-    t_score = time.perf_counter() - t_score0
-    logging.info("  Scored %.0f nodes", stats["rows_scored"])
-    if stats["risk_min"] is not None and stats["risk_max"] is not None:
-        logging.info("  Risk score range: [%.2f, %.2f]", stats["risk_min"], stats["risk_max"])
+    df = _normalize_degree_columns(df)
+    df = _attach_node_type_if_missing(df, cfg)
+    df, pr_stats = _attach_pagerank_if_enabled(df, cfg)
+    print(f"[phase4_score] pagerank rows={pr_stats.get('pagerank_rows', 0)} missing={pr_stats.get('pagerank_missing', 0)}", flush=True)
 
-    out_scores = str(Path(cfg.output_dir) / "risk_scores.parquet")
-    out_topk = str(Path(cfg.output_dir) / "topk_risk_scores.parquet")
-    out_report = str(Path(cfg.output_dir) / "fraud_scoring_report.json")
+    # apply simple min filters inline (since we already have df in memory)
+    df = df[df["in_w"].fillna(0.0) >= cfg.min_in_w]
+    df = df[df["in_deg"].fillna(0).astype(int) >= cfg.min_in_deg]
+    print(f"[phase4_score] after filters rows={len(df)}", flush=True)
 
-    t_write0 = time.perf_counter()
-    scored.to_parquet(out_scores, index=False)
+    scores = score_nodes(df, cfg)
+    print(f"[phase4_score] scored rows={len(scores)}", flush=True)
 
-    topk = scored.head(cfg.top_k).copy()
-    topk.to_parquet(out_topk, index=False)
-    t_write = time.perf_counter() - t_write0
+    out_dir = Path(cfg.output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    risk_path = out_dir / "risk_scores.parquet"
+    topk_path = out_dir / "topk_risk_scores.parquet"
+    scores.to_parquet(risk_path, index=False)
+    scores.head(cfg.top_k).to_parquet(topk_path, index=False)
+    print(f"[phase4_score] wrote risk -> {risk_path}", flush=True)
+    print(f"[phase4_score] wrote topk -> {topk_path}", flush=True)
 
-    total = time.perf_counter() - t0
-
-    preview_cols = ["node_id", "node_type", "risk_score", "rank", "in_w", "in_deg"]
-    if cfg.use_pagerank and cfg.w_pagerank != 0.0 and "pagerank" in topk.columns:
-        preview_cols.append("pagerank")
-
-    report = {
-        "inputs": {
-            "graph_dir": cfg.graph_dir,
-            "degree_path": degree_path,
-            "nodes_path_used_if_needed": (cfg.nodes_path or str(Path(cfg.graph_dir) / "nodes.parquet")),
-            "pagerank_path_used_if_enabled": (cfg.pagerank_path or str(Path(cfg.graph_dir) / "pagerank.parquet")),
-        },
-        "outputs": {
-            "risk_scores": out_scores,
-            "topk": out_topk,
-        },
-        "scoring": {
-            "method": cfg.method,
-            "score_node_types": cfg.score_node_types,
-            "weights": {
-                "w_in_w": cfg.w_in_w,
-                "w_in_deg": cfg.w_in_deg,
-                "w_out_w": cfg.w_out_w,
-                "w_out_deg": cfg.w_out_deg,
-                "use_pagerank": bool(cfg.use_pagerank),
-                "w_pagerank": cfg.w_pagerank,
-            },
-            "filters": {
-                "min_in_w": cfg.min_in_w,
-                "min_in_deg": cfg.min_in_deg,
-            },
-        },
-        "stats": stats,
-        "timings_sec": {
-            "read_degree": round(t_read, 4),
-            "score_compute": round(t_score, 4),
-            "write_outputs": round(t_write, 4),
-            "total": round(total, 4),
-        },
-        "topk_preview": topk[preview_cols].head(20).to_dict(orient="records"),
-        "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-    }
-
-    with open(out_report, "w", encoding="utf-8") as f:
-        json.dump(report, f, indent=2)
-
-    logging.info("Wrote risk scores: %s", out_scores)
-    logging.info("Wrote top-%d: %s", cfg.top_k, out_topk)
-    logging.info("Wrote report: %s", out_report)
-    logging.info("Total time: %.2fs", total)
-    logging.info("Phase 4 complete.")
+    total_time = time.perf_counter() - t0
+    print(f"[phase4_score] timings total={total_time:.2f}s", flush=True)
 
 
 def run_from_pipeline(

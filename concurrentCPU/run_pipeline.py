@@ -11,7 +11,6 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import os
 import secrets
 import sys
 import time
@@ -21,7 +20,6 @@ from pathlib import Path
 from statistics import mean, pstdev
 from typing import Dict, List
 
-import concurrent.futures
 import yaml
 from tqdm import tqdm
 
@@ -111,7 +109,7 @@ def compute_summary(csv_path: Path, summary_path: Path) -> None:
         return
 
     metrics = ["phase1_clean", "phase2_graph", "phase3_algos", "phase4_score", "total"]
-    summary = {"runs": len(rows)}
+    summary: Dict[str, object] = {"runs": len(rows)}
     for m in metrics:
         vals = [float(r[m]) for r in rows if r.get(m) not in (None, "")]
         if not vals:
@@ -232,6 +230,7 @@ def run_once(
     dataset_name: str,
 ) -> Dict:
     run_id = unique_run_id()
+    print(f"=== Run {run_id} | dataset={dataset_name} | approach={approach} ===", flush=True)
     run_dir = out_root / run_id
     phase_dirs = {
         "phase1_clean": run_dir / "phase1_clean",
@@ -244,6 +243,8 @@ def run_once(
     }
     ensure_dirs(list(phase_dirs.values()))
 
+    print(f"[{run_id}] Outputs -> {run_dir}", flush=True)
+
     # Save config snapshot
     cfg_snapshot_path = phase_dirs["reports"] / "config_snapshot.yaml"
     with open(cfg_snapshot_path, "w", encoding="utf-8") as f:
@@ -255,6 +256,7 @@ def run_once(
     t_total_start = time.perf_counter()
 
     # Phase 1: clean
+    print(f"[{run_id}] Starting phase1_clean", flush=True)
     t0 = time.perf_counter()
     clean_res = PHASE_MODULES["clean"].run_from_pipeline(
         pipeline_cfg,
@@ -264,13 +266,15 @@ def run_once(
         dataset_name=dataset_name,
     )
     timings["phase1_clean"] = time.perf_counter() - t0
-    phase_reports.append(clean_res)
+    print(f"[{run_id}] Finished phase1_clean in {timings['phase1_clean']:.2f}s", flush=True)
+    print(f"[{run_id}] Clean output -> {clean_res['artifacts'].get('clean_dir')}", flush=True)
 
     clean_manifest = Path(clean_res["artifacts"].get("clean_manifest")) if clean_res.get("artifacts") else None
     if clean_manifest and not clean_manifest.exists():
         clean_manifest = None
 
     # Phase 2: graph build
+    print(f"[{run_id}] Starting phase2_graph", flush=True)
     t0 = time.perf_counter()
     graph_res = PHASE_MODULES["graph"].run_from_pipeline(
         pipeline_cfg,
@@ -282,9 +286,11 @@ def run_once(
         dataset_name=dataset_name,
     )
     timings["phase2_graph"] = time.perf_counter() - t0
-    phase_reports.append(graph_res)
+    print(f"[{run_id}] Finished phase2_graph in {timings['phase2_graph']:.2f}s", flush=True)
+    print(f"[{run_id}] Graph output -> {graph_res['artifacts'].get('edges')}", flush=True)
 
     # Phase 3: algorithms
+    print(f"[{run_id}] Starting phase3_algos", flush=True)
     t0 = time.perf_counter()
     alg_res = PHASE_MODULES["algos"].run_from_pipeline(
         pipeline_cfg,
@@ -295,9 +301,11 @@ def run_once(
         dataset_name=dataset_name,
     )
     timings["phase3_algos"] = time.perf_counter() - t0
+    print(f"[{run_id}] Finished phase3_algos in {timings['phase3_algos']:.2f}s", flush=True)
     phase_reports.append(alg_res)
 
     # Phase 4: scoring
+    print(f"[{run_id}] Starting phase4_score", flush=True)
     t0 = time.perf_counter()
     score_res = PHASE_MODULES["score"].run_from_pipeline(
         pipeline_cfg,
@@ -308,9 +316,11 @@ def run_once(
         dataset_name=dataset_name,
     )
     timings["phase4_score"] = time.perf_counter() - t0
+    print(f"[{run_id}] Finished phase4_score in {timings['phase4_score']:.2f}s", flush=True)
     phase_reports.append(score_res)
 
     timings["total"] = time.perf_counter() - t_total_start
+    print(f"[{run_id}] Pipeline done in {timings['total']:.2f}s", flush=True)
 
     timings_path = phase_dirs["reports"] / "timings.json"
     run_report = {
@@ -360,6 +370,7 @@ def main() -> None:
 
     dataset_cfg = pipeline_cfg.get("dataset", {})
     dataset_name = str(dataset_cfg.get("name") or dataset_cfg.get("dataset_name") or "dataset")
+    payment_type = dataset_cfg.get("payment_type") or dataset_cfg.get("type")
 
     out_root_cfg = pipeline_cfg.get("output", {})
     root_dir = out_root_cfg.get("root_dir", "output")
@@ -378,12 +389,24 @@ def main() -> None:
         max_workers = 0
     max_workers = max(0, int(max_workers))
 
+    print(
+        "Configured run:",
+        f"dataset={dataset_name}",
+        f"payment_type={payment_type}",
+        f"runs={runs}",
+        f"approach={args.approach}",
+        f"max_workers={max_workers}",
+        f"output_root={out_root}",
+        sep=" | ",
+        flush=True,
+    )
+
     aggregate_dir = out_root / "aggregate"
     timing_csv = aggregate_dir / "timing_runs.csv"
     timing_summary = aggregate_dir / "timing_summary.json"
     run_metrics_csv = aggregate_dir / "run_metrics.csv"
 
-    def build_row(res: Dict) -> Dict:
+    def build_row(res: Dict) -> Dict[str, object]:
         return {
             "run_id": res["run_id"],
             "dataset": dataset_name,

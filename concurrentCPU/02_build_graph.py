@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -129,6 +129,7 @@ def run(cfg: GraphBuildConfig) -> None:
     ensure_dir(str(out_dir))
 
     clean_dir = Path(cfg.input_clean_dir)
+    print(f"[phase2_graph] input_clean_dir={clean_dir} -> output_graph_dir={out_dir}", flush=True)
     if not clean_dir.exists():
         raise FileNotFoundError(f"input_clean_dir not found: {clean_dir}")
 
@@ -139,6 +140,7 @@ def run(cfg: GraphBuildConfig) -> None:
         ddf = ddf.repartition(npartitions=int(cfg.dask_npartitions))
 
     timings["t_read_parquet_graph"] = round(time.perf_counter() - t_read_start, 4)
+    print(f"[phase2_graph] read parquet nparts={ddf.npartitions}", flush=True)
 
     required = [cfg.payer_id_col, cfg.payer_name_norm_col, cfg.payee_key_col, cfg.amount_col]
     missing = [c for c in required if c not in ddf.columns]
@@ -169,6 +171,7 @@ def run(cfg: GraphBuildConfig) -> None:
     meta_edges = {"src": "object", "dst": "object", "w": "float64", "date": "object"}
     edges_base = ddf.map_partitions(_mk_edges, meta=meta_edges)
     timings["t_edges_base_graph"] = round(time.perf_counter() - t_edges_base_start, 4)
+    print(f"[phase2_graph] built edges_base partitions={edges_base.npartitions}", flush=True)
 
     t_groupby_start = time.perf_counter()
 
@@ -187,6 +190,7 @@ def run(cfg: GraphBuildConfig) -> None:
         ).reset_index()
 
     timings["t_groupby_graph"] = round(time.perf_counter() - t_groupby_start, 4)
+    print(f"[phase2_graph] grouped edges -> {len(grouped.columns)} cols", flush=True)
 
     if cfg.min_edge_weight and cfg.min_edge_weight > 0:
         grouped = grouped[grouped["w_total"] >= cfg.min_edge_weight]
@@ -196,6 +200,7 @@ def run(cfg: GraphBuildConfig) -> None:
     t_write_edges_start = time.perf_counter()
     grouped.to_parquet(str(edges_path), engine="pyarrow", write_index=False, schema="infer")
     timings["t_write_edges_parquet"] = round(time.perf_counter() - t_write_edges_start, 4)
+    print(f"[phase2_graph] wrote edges -> {edges_path}", flush=True)
 
     t_nodes_start = time.perf_counter()
 
@@ -213,6 +218,7 @@ def run(cfg: GraphBuildConfig) -> None:
     nodes_path = out_dir / "nodes.parquet"
     nodes_ddf.to_parquet(str(nodes_path), engine="pyarrow", write_index=False, schema="infer")
     timings["t_write_nodes_parquet"] = round(time.perf_counter() - t_nodes_start, 4)
+    print(f"[phase2_graph] wrote nodes -> {nodes_path}", flush=True)
 
     # Stats/report (compute a few key scalars)
     t_stats_start = time.perf_counter()
@@ -228,6 +234,7 @@ def run(cfg: GraphBuildConfig) -> None:
     # Node type counts
     node_type_counts = nodes_ddf["node_type"].value_counts().compute().to_dict()
     timings["t_stats"] = round(time.perf_counter() - t_stats_start, 4)
+    print(f"[phase2_graph] stats edges={edges_count} nodes={nodes_count}", flush=True)
 
     total_time = time.perf_counter() - t0
     report = {

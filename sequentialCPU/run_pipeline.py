@@ -143,8 +143,6 @@ def run_once(
         "phase3_algos": run_dir / "phase3_algos",
         "phase4_score": run_dir / "phase4_score",
         "reports": run_dir / "reports",
-        "logs": run_dir / "logs",
-        "figs": run_dir / "figs",
     }
     ensure_dirs(list(phase_dirs.values()))
 
@@ -291,6 +289,11 @@ def run_once(
     }
 
 
+def fraction_label_from_fraction(fraction: float) -> str:
+    pct = int(round(max(0.0, fraction) * 100))
+    return f"fraction_{pct:02d}pct"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run sequential CPU pipeline end-to-end")
     parser.add_argument("--config", required=True, help="Path to unified pipeline YAML config")
@@ -311,10 +314,13 @@ def main() -> None:
 
     out_root_cfg = pipeline_cfg.get("output", {})
     root_dir = out_root_cfg.get("root_dir", "output")
+    sampling_fraction = float(pipeline_cfg.get("phase1_clean", {}).get("sampling", {}).get("fraction", 1.0))
+    fraction_dir = fraction_label_from_fraction(sampling_fraction)
+
     out_root = Path(root_dir)
     if not out_root.is_absolute():
         out_root = REPO_ROOT / out_root
-    out_root = out_root / args.approach / dataset_name
+    out_root = out_root / args.approach / dataset_name / fraction_dir
     out_root.mkdir(parents=True, exist_ok=True)
 
     runs = int(pipeline_cfg.get("runs", {}).get("n_runs", args.runs) or args.runs)

@@ -262,7 +262,7 @@ def create_dataset_fingerprint(config: CleanConfig, config_path: str) -> Dict:
 # Normalization helpers
 # ---------------------------
 
-_PUNCT_RE = re.compile(r"[.,;:()\\[\\]{}'\"`]+")
+_PUNCT_RE = re.compile(r"[.,;:()\[\]{}'\"`]+")
 
 
 def normalize_name(s: Optional[str]) -> Optional[str]:
@@ -535,6 +535,11 @@ def sanitize_for_parquet(pdf: pd.DataFrame) -> pd.DataFrame:
         if c in int8_cols:
             # Coerce '1' -> 1 and None/NaN -> <NA>, then to pandas nullable Int8
             pdf[c] = pd.to_numeric(s, errors="coerce").astype("Int8")
+            continue
+
+        if c in intlike_cols:
+            # Convert numeric-looking strings to integers; allow <NA> for any bad values.
+            pdf[c] = pd.to_numeric(s, errors="coerce").astype("Int16")
             continue
 
         # Everything else: treat as string-ish object column.
@@ -1112,7 +1117,7 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
                 "hospital_id_missing_pct": (hosp_missing_id / hosp * 100.0) if hosp else None,
             },
             "timings_sec": {"total": round(total_time, 4), **timings},
-            "scaling": {**scale_info, **sample_info},
+            "scaling": {**scale_info},
             "reproducibility": {
                 "normalization_version": NORMALIZATION_VERSION,
                 "normalization_description": NORMALIZATION_DESCRIPTION,

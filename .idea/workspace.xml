@@ -2,45 +2,20 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="f725bebf-47a6-46cf-819c-59d24d69138e" name="Changes" comment="">
-      <change afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/ParallelFraudDetection.iml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/copilot.data.migration.ask2agent.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/Project_Default.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/04_fraud_scoring.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/05_visualize_results.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/README.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_research_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/concurrentCPU/run_pipeline.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/01_clean_data_gpu.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/02_build_graph_gpu.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/03_graph_algorithms_gpu.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/04_fraud_scoring_gpu.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/configs/pipeline_general_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/configs/pipeline_research_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/parallelGPU/run_pipeline.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/01_clean_data.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/02_build_graph.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/03_graph_algorithms.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/04_fraud_scoring.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/05_visualize_results.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/README.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_research_2024.yaml" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/run_pipeline.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/04_fraud_scoring.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/04_fraud_scoring.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/05_visualize_results.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/run_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/run_pipeline.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/01_clean_data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/05_visualize_results.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_general_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_ownership_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_research_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_research_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/run_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/run_pipeline.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -57,6 +32,18 @@
   <component name="Git.Settings">
     <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
   </component>
+  <component name="GitHubPullRequestSearchHistory"><![CDATA[{
+  "lastFilter": {
+    "state": "OPEN",
+    "assignee": "MartinJanev"
+  }
+}]]></component>
+  <component name="GithubPullRequestsUISettings"><![CDATA[{
+  "selectedUrlAndAccountId": {
+    "url": "https://github.com/MartinJanev/FraudDetection.git",
+    "accountId": "a95040f0-035b-4db4-9d5c-9b91a0b8c0f2"
+  }
+}]]></component>
   <component name="ProjectColorInfo">{
   &quot;associatedIndex&quot;: 7
 }</component>
@@ -65,27 +52,27 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.01_clean_data.executor": "Run",
-    "Python.check_ownership.executor": "Run",
-    "Python.full_verification.executor": "Run",
-    "Python.test_setup.executor": "Run",
-    "Python.verify_output.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "SHELLCHECK.PATH": "I do mind",
-    "ai.playground.ignore.import.keys.banner.in.settings": "true",
-    "git-widget-placeholder": "master",
-    "last_opened_file_path": "D:/ParallelFraudDetection/parallelGPU",
-    "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "terminal",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.01_clean_data.executor&quot;: &quot;Run&quot;,
+    &quot;Python.check_ownership.executor&quot;: &quot;Run&quot;,
+    &quot;Python.full_verification.executor&quot;: &quot;Run&quot;,
+    &quot;Python.test_setup.executor&quot;: &quot;Run&quot;,
+    &quot;Python.verify_output.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;SHELLCHECK.PATH&quot;: &quot;I do mind&quot;,
+    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;last_opened_file_path&quot;: &quot;D:/ParallelFraudDetection/parallelGPU&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;terminal&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="D:\ParallelFraudDetection\parallelGPU" />
@@ -377,6 +364,7 @@
       <workItem from="1769795300176" duration="312000" />
       <workItem from="1769795807181" duration="13225000" />
       <workItem from="1769861469254" duration="26126000" />
+      <workItem from="1769911920334" duration="3494000" />
     </task>
     <servers />
   </component>
