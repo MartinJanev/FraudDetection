@@ -1,0 +1,11 @@
+numpy
+pandas
+pyarrow
+pyyaml
+tqdm
+networkx
+scipy
+matplotlib
+
+dask[dataframe,distributed]
+networkit

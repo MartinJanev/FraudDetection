@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project specific
+output/
+output_cpu/
+CMS_Open_Payements2024/
+concurentCPU/printAllFiles.sh
+all_contents.txt
+a_doc/
+*.parquet
+*.csv.gz
+CMS_Open_Payements2024/*.csv
+CMS_Open_Payements2024/*.txt
+CMS_Open_Payements2024/*.zip
+
+# Keep directory structure but ignore data
+!.gitkeep
+
+# Logs
+*.log
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb
+
+# Data science
+*.pkl
+*.pickle
+*.h5
+*.hdf5
+
