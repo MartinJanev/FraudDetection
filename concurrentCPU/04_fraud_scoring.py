@@ -15,10 +15,6 @@ Produces:
 - topk_risk_scores.parquet
 - fraud_scoring_report.json
 
-Design principles:
-- Deterministic, explainable scoring function (no ML training)
-- Scoring uses only graph-derived outputs (degree + optional pagerank), not raw edges
-- Same scoring semantics can be reused across sequential/concurrent CPU and GPU stacks
 """
 
 from __future__ import annotations

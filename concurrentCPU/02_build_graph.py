@@ -16,10 +16,6 @@ Outputs:
 - edges.parquet (dataset)
 - nodes.parquet
 - graph_build_report.json
-
-Paper-consistent intent:
-- Partitioned storage (Parquet) + Dask groupby for parallel aggregation.
-- Deterministic node IDs (same rules as your sequential version).
 """
 
 from __future__ import annotations

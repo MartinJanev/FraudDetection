@@ -25,7 +25,7 @@ phase1_clean:
     fraction: 0.1  # options for experiments: 0.01 (1%), 0.05 (5%), 0.10 (10%), 0.25 (25%), 1.0 (full dataset)
     seed: 42
   stats:
-    compute_median: false       # keep off for speed
+    compute_median: false
 
 
 phase2_graph:

@@ -2,19 +2,6 @@
 """concurrentCPU/01_clean_data.py
 
 Phase 1 (Concurrent CPU via Dask): Extract + Clean CMS Open Payments into canonical schema.
-
-Fixes included (critical for responsiveness and speed):
-- Single-pass stats: collapse multiple .compute() calls into one dask.compute() batch.
-- Optional median: quantile(0.5) is expensive; default remains configurable via YAML.
-- Persist once for reuse: materialize (persist) the sanitized valid/rejected frames once and reuse for both writes and stats.
-  This prevents recomputation of the entire DAG multiple times.
-- Optional pandas stats fast-path for small datasets (stats-only; does NOT affect parquet outputs).
-- Optional deterministic sampling method:
-    * sha1 (default): matches sequential semantics (slow but equivalent)
-    * fast_hash: uses pandas hash_pandas_object (much faster, deterministic, but NOT sha1-identical)
-- Dask worker control: if scheduler=threads and max_workers>0, uses a ThreadPoolExecutor sized to max_workers.
-
-Important: Concurrency is inside Dask partitions; do NOT run multiple full pipelines in parallel.
 """
 
 from __future__ import annotations
@@ -68,23 +55,21 @@ class CleanConfig:
 
     # Dask tuning
     use_dask: bool = True
-    blocksize: str = "256MB"  # read_csv blocksize
-    dask_npartitions: int = 0  # 0 = let Dask decide
+    blocksize: str = "256MB"
+    dask_npartitions: int = 0
     scheduler: str = "threads"  # threads/processes/synchronous
-    persist: bool = True  # cache sanitized frames in memory before write/stats
+    persist: bool = True
 
     # Output
-    write_format: str = "parquet"  # parquet recommended for concurrent pipeline
+    write_format: str = "parquet"
     keep_source_file: bool = True
     skip_rejected: bool = True
 
-    # Sequential-equivalent sampling (applied after canonicalization, per record_id)
     sampling_fraction: float = 1.0
     sampling_seed: Optional[int] = None
     sampling_method: str = "sha1"  # "sha1" (sequential-equivalent) or "fast_hash" (faster, not sha1-identical)
     sampling_stage: str = "raw"  # "canonical" (existing behavior) or "raw" (sample before canonicalization)
 
-    # Legacy scale knobs (kept for compatibility)
     scale_mode: str = "none"
     scale_value: Optional[float] = None
     scale_key_cols: Optional[List[str]] = None

@@ -8,12 +8,6 @@ This version aligns with the paper's *parallel CPU* idea:
 
 Reads:   <graph_dir>/edges.parquet  (src, dst, w_total, n_payments)
 Writes:  degree.parquet, pagerank.parquet, components.parquet, algos_report.json
-
-Notes on concurrency
-- Dask: parallelizes groupby aggregations over Parquet partitions.
-- NetworKit: parallelizes internal kernels via OpenMP threads.
-
-If you set max_threads > 0, we apply it to NetworKit and (best-effort) to Dask.
 """
 
 from __future__ import annotations
@@ -39,7 +33,6 @@ except Exception as e:
         "Install: pip install networkit"
     ) from e
 
-# Optional: Dask for parallel degree aggregation.
 try:
     import dask
     import dask.dataframe as dd
@@ -317,7 +310,6 @@ def run(cfg: AlgoConfig) -> None:
     print(f"[phase3_algos] degree rows={len(degrees)}", flush=True)
 
     # --- Graph algorithms (NetworKit; require edges in-memory as pandas) ---
-    # We re-read as pandas *only* with the columns needed for algorithms.
     t_edges_pd_start = time.perf_counter()
     edges_pd = load_edges_pandas(cfg.graph_dir)
     t_edges_pd = time.perf_counter() - t_edges_pd_start

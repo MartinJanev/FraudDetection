@@ -2,9 +2,13 @@
 <project version="4">
   <component name="ChangeListManager">
     <list default="true" id="f725bebf-47a6-46cf-819c-59d24d69138e" name="Changes" comment="latest project version">
-      <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentCPU/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/sequentialCPU/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_general_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_ownership_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_research_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_research_2024.yaml" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -358,7 +362,8 @@
       <workItem from="1769954911671" duration="11202000" />
       <workItem from="1769967747289" duration="9135000" />
       <workItem from="1769978178612" duration="2038000" />
-      <workItem from="1770078818012" duration="451000" />
+      <workItem from="1770078818012" duration="825000" />
+      <workItem from="1770119837290" duration="758000" />
     </task>
     <task id="LOCAL-00001" summary="fixed sequentialCPU with fractional data work">
       <option name="closed" value="true" />
@@ -376,7 +381,15 @@
       <option name="project" value="LOCAL" />
       <updated>1770078849301</updated>
     </task>
-    <option name="localTasksCounter" value="3" />
+    <task id="LOCAL-00003" summary="latest project version">
+      <option name="closed" value="true" />
+      <created>1770079444611</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1770079444611</updated>
+    </task>
+    <option name="localTasksCounter" value="4" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
