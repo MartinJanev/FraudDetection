@@ -36,6 +36,7 @@ from typing import Dict, Optional
 import numpy as np
 import pandas as pd
 import yaml
+from dask.diagnostics import ProgressBar
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -116,6 +117,15 @@ def node_type_from_id(node_id: str) -> str:
     return "unknown"
 
 
+# Reusable sanitizer to ensure Arrow-friendly string columns
+def sanitize_strings_for_parquet(pdf: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
+    pdf = pdf.copy()
+    for c in cols:
+        if c in pdf.columns:
+            pdf[c] = pdf[c].map(lambda x: None if x is None else str(x)).astype("string[python]")
+    return pdf
+
+
 def run(cfg: GraphBuildConfig) -> None:
     try:
         import dask
@@ -160,15 +170,16 @@ def run(cfg: GraphBuildConfig) -> None:
         out = pd.DataFrame({"src": src, "dst": dst, "w": amount})
 
         if cfg.date_col and cfg.date_col in pdf.columns:
-            out["date"] = pdf[cfg.date_col].fillna("").astype(str).str.strip()
+            date_raw = pdf[cfg.date_col].fillna("").astype(str).str.strip()
+            out["date"] = pd.to_datetime(date_raw, errors="coerce")
         else:
-            out["date"] = ""
+            out["date"] = pd.NaT
 
         out = out[out["src"].ne("") & out["dst"].ne("") & out["w"].notna()]
         return out
 
     t_edges_base_start = time.perf_counter()
-    meta_edges = {"src": "object", "dst": "object", "w": "float64", "date": "object"}
+    meta_edges = {"src": "object", "dst": "object", "w": "float64", "date": "datetime64[ns]"}
     edges_base = ddf.map_partitions(_mk_edges, meta=meta_edges)
     timings["t_edges_base_graph"] = round(time.perf_counter() - t_edges_base_start, 4)
     print(f"[phase2_graph] built edges_base partitions={edges_base.npartitions}", flush=True)
@@ -189,6 +200,45 @@ def run(cfg: GraphBuildConfig) -> None:
             n_payments=("w", "size"),
         ).reset_index()
 
+    # sanitize dtypes to avoid pyarrow object issues
+    def _sanitize_grouped(pdf: pd.DataFrame) -> pd.DataFrame:
+        pdf = pdf.copy()
+        pdf["src"] = pdf["src"].astype(str)
+        pdf["dst"] = pdf["dst"].astype(str)
+        pdf["w_total"] = pd.to_numeric(pdf["w_total"], errors="coerce")
+        pdf["n_payments"] = pd.to_numeric(pdf["n_payments"], errors="coerce").astype("Int64")
+
+        def _safe_to_ns(s: pd.Series) -> pd.Series:
+            dt = pd.to_datetime(s, errors="coerce")
+            # Clip impossible years to NaT to avoid pandas/pyarrow bounds errors
+            dt = dt.where((dt.dt.year >= 1900) & (dt.dt.year <= 2100))
+            return dt.astype("datetime64[ns]")
+
+        if "min_date" in pdf.columns:
+            pdf["min_date"] = _safe_to_ns(pdf["min_date"])
+        if "max_date" in pdf.columns:
+            pdf["max_date"] = _safe_to_ns(pdf["max_date"])
+        return pdf
+
+    if cfg.date_col:
+        meta_df = pd.DataFrame({
+            "src": pd.Series(dtype="string[python]"),
+            "dst": pd.Series(dtype="string[python]"),
+            "w_total": pd.Series(dtype="float64"),
+            "n_payments": pd.Series(dtype="Int64"),
+            "min_date": pd.Series(dtype="datetime64[ns]"),
+            "max_date": pd.Series(dtype="datetime64[ns]"),
+        })
+    else:
+        meta_df = pd.DataFrame({
+            "src": pd.Series(dtype="string[python]"),
+            "dst": pd.Series(dtype="string[python]"),
+            "w_total": pd.Series(dtype="float64"),
+            "n_payments": pd.Series(dtype="Int64"),
+        })
+
+    grouped = grouped.map_partitions(_sanitize_grouped, meta=meta_df)
+
     timings["t_groupby_graph"] = round(time.perf_counter() - t_groupby_start, 4)
     print(f"[phase2_graph] grouped edges -> {len(grouped.columns)} cols", flush=True)
 
@@ -198,7 +248,8 @@ def run(cfg: GraphBuildConfig) -> None:
     # Write edges as parquet dataset (partitioned)
     edges_path = out_dir / "edges.parquet"
     t_write_edges_start = time.perf_counter()
-    grouped.to_parquet(str(edges_path), engine="pyarrow", write_index=False, schema="infer")
+    with ProgressBar():
+        grouped.to_parquet(str(edges_path), engine="pyarrow", write_index=False, schema="infer")
     timings["t_write_edges_parquet"] = round(time.perf_counter() - t_write_edges_start, 4)
     print(f"[phase2_graph] wrote edges -> {edges_path}", flush=True)
 
@@ -210,13 +261,23 @@ def run(cfg: GraphBuildConfig) -> None:
     all_nodes = dd.concat([src_nodes, dst_nodes], axis=0).drop_duplicates().to_frame(name="node_id")
 
     def _node_types(pdf: pd.DataFrame) -> pd.DataFrame:
-        pdf["node_type"] = pdf["node_id"].astype(str).map(node_type_from_id)
+        pdf = pdf.copy()
+        pdf["node_id"] = pdf["node_id"].astype("string[python]")
+        pdf["node_type"] = pdf["node_id"].map(lambda x: node_type_from_id(str(x)) if x is not None else "unknown")
+        pdf["node_type"] = pdf["node_type"].astype("string[python]")
         return pdf
 
-    meta_nodes = {"node_id": "object", "node_type": "object"}
-    nodes_ddf = all_nodes.map_partitions(_node_types, meta=meta_nodes)
+    meta_nodes_df = pd.DataFrame({
+        "node_id": pd.Series(dtype="string[python]"),
+        "node_type": pd.Series(dtype="string[python]"),
+    })
+
+    nodes_ddf = all_nodes.map_partitions(_node_types, meta=meta_nodes_df)
+    nodes_ddf = nodes_ddf.map_partitions(sanitize_strings_for_parquet, cols=["node_id", "node_type"], meta=meta_nodes_df)
+
     nodes_path = out_dir / "nodes.parquet"
-    nodes_ddf.to_parquet(str(nodes_path), engine="pyarrow", write_index=False, schema="infer")
+    with ProgressBar():
+        nodes_ddf.to_parquet(str(nodes_path), engine="pyarrow", write_index=False)
     timings["t_write_nodes_parquet"] = round(time.perf_counter() - t_nodes_start, 4)
     print(f"[phase2_graph] wrote nodes -> {nodes_path}", flush=True)
 
