@@ -1,33 +1,32 @@
 #!/usr/bin/env python3
-"""
+"""concurrentCPU/01_clean_data.py
+
 Phase 1 (Concurrent CPU via Dask): Extract + Clean CMS Open Payments into canonical schema.
 
-Paper-consistent intent:
-- Partitioned storage (Parquet dataset).
-- Parallel ingestion + preprocessing (Dask DataFrame).
-- Deterministic canonicalization semantics (same canonical columns, same payee_key logic).
+Fixes included (critical for responsiveness and speed):
+- Single-pass stats: collapse multiple .compute() calls into one dask.compute() batch.
+- Optional median: quantile(0.5) is expensive; default remains configurable via YAML.
+- Persist once for reuse: materialize (persist) the sanitized valid/rejected frames once and reuse for both writes and stats.
+  This prevents recomputation of the entire DAG multiple times.
+- Optional pandas stats fast-path for small datasets (stats-only; does NOT affect parquet outputs).
+- Optional deterministic sampling method:
+    * sha1 (default): matches sequential semantics (slow but equivalent)
+    * fast_hash: uses pandas hash_pandas_object (much faster, deterministic, but NOT sha1-identical)
+- Dask worker control: if scheduler=threads and max_workers>0, uses a ThreadPoolExecutor sized to max_workers.
 
-Outputs (under output_dir):
-- payments_clean/         (Parquet dataset, partitioned by Dask)
-- payments_rejected/      (optional Parquet dataset)
-- cleaning_report.json
-- dataset_fingerprint.json
-- config_used.yaml (snapshot)
-
-Important:
-- This code uses your existing canonicalization functions (pandas-on-partition).
-- Concurrency is inside Dask partitions; do NOT run many full pipelines in parallel.
+Important: Concurrency is inside Dask partitions; do NOT run multiple full pipelines in parallel.
 """
 
 from __future__ import annotations
 
 import argparse
 import hashlib
-import shutil
 import json
 import logging
 import re
+import shutil
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -36,6 +35,12 @@ from typing import Dict, Iterable, List, Optional
 import numpy as np
 import pandas as pd
 import yaml
+
+# dask imports happen inside run() so the module can import even if dask is missing
+
+import warnings
+
+warnings.filterwarnings("ignore", message="Could not infer format, so each element will be parsed individually")
 
 # ---------------------------
 # Reproducibility Constants
@@ -66,23 +71,23 @@ class CleanConfig:
     blocksize: str = "256MB"  # read_csv blocksize
     dask_npartitions: int = 0  # 0 = let Dask decide
     scheduler: str = "threads"  # threads/processes/synchronous
+    persist: bool = True  # cache sanitized frames in memory before write/stats
 
     # Output
     write_format: str = "parquet"  # parquet recommended for concurrent pipeline
     keep_source_file: bool = True
     skip_rejected: bool = True
 
-    # Dataset scaling (Phase 1 only)
-    # scale:
-    #   enabled: bool
-    #   fraction: float (0-1]
-    #   seed: int
-    #   method: "hash_record_id"
-    # Legacy-scale fields (pre-canonical sampling) kept for compatibility
+    # Sequential-equivalent sampling (applied after canonicalization, per record_id)
+    sampling_fraction: float = 1.0
+    sampling_seed: Optional[int] = None
+    sampling_method: str = "sha1"  # "sha1" (sequential-equivalent) or "fast_hash" (faster, not sha1-identical)
+    sampling_stage: str = "raw"  # "canonical" (existing behavior) or "raw" (sample before canonicalization)
+
+    # Legacy scale knobs (kept for compatibility)
     scale_mode: str = "none"
     scale_value: Optional[float] = None
     scale_key_cols: Optional[List[str]] = None
-    # New record_id-based sampling
     scale_enabled: bool = False
     scale_fraction: float = 1.0
     scale_seed: int = 123
@@ -91,6 +96,17 @@ class CleanConfig:
     # Optional overrides
     column_mapping: Optional[Dict[str, str]] = None
     max_workers: Optional[int] = None
+
+    # Stats tuning
+    stats_compute_median: bool = False
+    stats_median_method: str = "exact"  # "exact" or "approx"
+    stats_pandas_threshold: int = 0  # 0 disables pandas fast-path
+    compute_stats: bool = True  # allow turning stats off for bulk experiments
+
+
+# ---------------------------
+# Config parsing
+# ---------------------------
 
 
 def _parse_pipeline_style_config(raw: Dict, config_dir: Path) -> CleanConfig:
@@ -111,7 +127,7 @@ def _parse_pipeline_style_config(raw: Dict, config_dir: Path) -> CleanConfig:
     if isinstance(input_files, str):
         input_files = [input_files]
 
-    resolved_inputs = []
+    resolved_inputs: List[str] = []
     for f in input_files:
         p = Path(f)
         if not p.is_absolute():
@@ -132,6 +148,17 @@ def _parse_pipeline_style_config(raw: Dict, config_dir: Path) -> CleanConfig:
 
     phase_cfg = raw.get("phase1_clean", {})
     scale_cfg = dataset.get("scale", {}) or {}
+    sampling_cfg = (phase_cfg.get("sampling", {}) or {})
+    stats_cfg = (phase_cfg.get("stats", {}) or {})
+    exec_cfg = raw.get("execution", {}) or {}
+
+    max_workers = exec_cfg.get("max_workers")
+    if max_workers is not None:
+        try:
+            max_workers = int(max_workers)
+        except Exception:
+            max_workers = None
+
     return CleanConfig(
         dataset_type=dataset_type,
         program_year=program_year,
@@ -141,19 +168,27 @@ def _parse_pipeline_style_config(raw: Dict, config_dir: Path) -> CleanConfig:
         blocksize=str(phase_cfg.get("blocksize", "256MB")),
         dask_npartitions=int(phase_cfg.get("dask_npartitions", 0)),
         scheduler=str(phase_cfg.get("scheduler", "threads")),
+        persist=bool(phase_cfg.get("persist", True)),
         write_format=str(phase_cfg.get("write_format", "parquet")),
         keep_source_file=bool(phase_cfg.get("keep_source_file", True)),
         skip_rejected=bool(phase_cfg.get("skip_rejected", True)),
-        # legacy scale params (unused when method is hash_record_id)
+        sampling_fraction=float(sampling_cfg.get("fraction", 1.0)),
+        sampling_seed=sampling_cfg.get("seed"),
+        sampling_method=str(sampling_cfg.get("method", "sha1")),
+        sampling_stage=str(sampling_cfg.get("stage", "canonical")),
         scale_mode=str(scale_cfg.get("mode", scale_cfg.get("scale_mode", "none"))),
         scale_value=scale_cfg.get("value", scale_cfg.get("scale_value", None)),
         scale_key_cols=scale_cfg.get("key_cols", None),
-        # new sampling knob (disabled by default)
         scale_enabled=bool(scale_cfg.get("enabled", False)),
         scale_fraction=float(scale_cfg.get("fraction", 1.0)),
         scale_seed=int(scale_cfg.get("seed", 123)),
         scale_method=str(scale_cfg.get("method", "hash_record_id")),
         column_mapping=phase_cfg.get("column_mapping"),
+        max_workers=max_workers,
+        stats_compute_median=bool(stats_cfg.get("compute_median", False)),
+        stats_median_method=str(stats_cfg.get("median_method", "exact")),
+        stats_pandas_threshold=int(stats_cfg.get("use_pandas_if_rows_lt", 0)),
+        compute_stats=bool(phase_cfg.get("compute_stats", True)),
     )
 
 
@@ -166,7 +201,7 @@ def load_config(path: str) -> CleanConfig:
         return _parse_pipeline_style_config(raw, config_dir)
 
     def resolve_list(files: List[str]) -> List[str]:
-        out = []
+        out: List[str] = []
         for fp in files:
             p = Path(fp)
             if not p.is_absolute():
@@ -174,88 +209,34 @@ def load_config(path: str) -> CleanConfig:
             out.append(str(p.resolve()))
         return out
 
+    sampling_cfg = (raw.get("sampling", {}) or {})
+    stats_cfg = (raw.get("stats", {}) or {})
+
     return CleanConfig(
         dataset_type=str(raw["dataset_type"]),
         program_year=int(raw["program_year"]),
         input_files=resolve_list(list(raw["input_files"])),
-        output_dir=str((config_dir / raw["output_dir"]).resolve()) if not Path(
-            raw["output_dir"]).is_absolute() else str(Path(raw["output_dir"]).resolve()),
+        output_dir=str((config_dir / raw["output_dir"]).resolve())
+        if not Path(raw["output_dir"]).is_absolute()
+        else str(Path(raw["output_dir"]).resolve()),
         use_dask=bool(raw.get("use_dask", True)),
         blocksize=str(raw.get("blocksize", "256MB")),
         dask_npartitions=int(raw.get("dask_npartitions", 0)),
         scheduler=str(raw.get("scheduler", "threads")),
+        persist=bool(raw.get("persist", True)),
         write_format=str(raw.get("write_format", "parquet")),
         keep_source_file=bool(raw.get("keep_source_file", True)),
         skip_rejected=bool(raw.get("skip_rejected", True)),
+        sampling_fraction=float(sampling_cfg.get("fraction", 1.0)),
+        sampling_seed=sampling_cfg.get("seed"),
+        sampling_method=str(sampling_cfg.get("method", "sha1")),
+        sampling_stage=str(sampling_cfg.get("stage", "canonical")),
         column_mapping=raw.get("column_mapping"),
+        stats_compute_median=bool(stats_cfg.get("compute_median", False)),
+        stats_median_method=str(stats_cfg.get("median_method", "exact")),
+        stats_pandas_threshold=int(stats_cfg.get("use_pandas_if_rows_lt", 0)),
+        compute_stats=bool(raw.get("compute_stats", True)),
     )
-
-
-# ---------------------------
-# Dataset Fingerprinting
-# ---------------------------
-
-def compute_file_fingerprint(filepath: str, hash_mb: int = FINGERPRINT_MB) -> Dict:
-    path = Path(filepath)
-    if not path.exists():
-        return {"file": str(path.name), "exists": False, "error": "File not found"}
-
-    stat = path.stat()
-    file_size = stat.st_size
-    modified_time = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-
-    hash_obj = hashlib.sha1()
-    bytes_to_hash = hash_mb * 1024 * 1024
-    bytes_hashed = 0
-    try:
-        with open(filepath, "rb") as f:
-            while bytes_hashed < bytes_to_hash:
-                chunk = f.read(min(8192, bytes_to_hash - bytes_hashed))
-                if not chunk:
-                    break
-                hash_obj.update(chunk)
-                bytes_hashed += len(chunk)
-        partial_hash = hash_obj.hexdigest()
-    except Exception as e:
-        partial_hash = f"error: {e}"
-
-    return {
-        "file": str(path.name),
-        "absolute_path": str(path.absolute()),
-        "size_bytes": file_size,
-        "size_mb": round(file_size / (1024 * 1024), 2),
-        "modified_utc": modified_time,
-        "partial_hash": partial_hash,
-        "hash_method": f"{HASH_FUNCTION}(first_{hash_mb}MB)",
-    }
-
-
-def create_dataset_fingerprint(config: CleanConfig, config_path: str) -> Dict:
-    input_fingerprints = [compute_file_fingerprint(fpath) for fpath in config.input_files]
-    with open(config_path, "r", encoding="utf-8") as f:
-        config_snapshot = yaml.safe_load(f)
-
-    return {
-        "fingerprint_version": "1.0",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "reproducibility": {
-            "normalization_version": NORMALIZATION_VERSION,
-            "normalization_description": NORMALIZATION_DESCRIPTION,
-            "hash_function": HASH_FUNCTION,
-        },
-        "config_snapshot": config_snapshot,
-        "input_files": input_fingerprints,
-        "processing_params": {
-            "dataset_type": config.dataset_type,
-            "program_year": config.program_year,
-            "write_format": config.write_format,
-            "keep_source_file": config.keep_source_file,
-            "use_dask": config.use_dask,
-            "blocksize": config.blocksize,
-            "dask_npartitions": config.dask_npartitions,
-            "scheduler": config.scheduler,
-        },
-    }
 
 
 # ---------------------------
@@ -272,14 +253,14 @@ def normalize_name(s: Optional[str]) -> Optional[str]:
     if not s:
         return None
     s = _PUNCT_RE.sub("", s)
-    s = re.sub(r"\\s+", " ", s)
+    s = re.sub(r"\s+", " ", s)
     return s.upper()
 
 
 def normalize_zip5(z: Optional[str]) -> Optional[str]:
     if z is None:
         return None
-    z = re.sub(r"\\D+", "", str(z))
+    z = re.sub(r"\D+", "", str(z))
     if len(z) < 5:
         return None
     return z[:5]
@@ -293,7 +274,7 @@ def safe_float(x) -> Optional[float]:
         if s == "" or s.lower() in {"nan", "none"}:
             return None
         s = s.replace(",", "")
-        s = re.sub(r"[^0-9.\\-]", "", s)
+        s = re.sub(r"[^0-9.\-]", "", s)
         if s in {"", "-", "."}:
             return None
         return float(s)
@@ -323,81 +304,45 @@ def stable_hash_hex(parts: Iterable[Optional[str]]) -> str:
 
 
 # ---------------------------
-# Canonical columns + CMS mappings (unchanged from your current script)
+# Canonical columns + CMS mappings
 # ---------------------------
 
-def make_canonical_meta(cfg: CleanConfig) -> pd.DataFrame:
-    # Use pandas StringDtype so Dask meta_nonempty doesn't inject `object()` sentinels.
-    S = "string[python]"   # safe & pyarrow-friendly
-    B = "bool"
-    I = "int16"
-    F = "float64"
-    I8 = "Int8"  # pandas nullable int8
-
-    dtypes = {
-        "record_id": S,
-        "program_year": I,
-        "dataset_type": S,
-        "source_file": S,
-
-        "payer_name_raw": S,
-        "payer_name_norm": S,
-        "payer_id": S,
-        "payer_state": S,
-        "payer_country": S,
-
-        "payee_type": S,
-        "payee_key": S,
-
-        "physician_npi": S,
-        "physician_profile_id": S,
-        "physician_name_raw": S,
-        "physician_name_norm": S,
-        "physician_specialty": S,
-        "physician_primary_type": S,
-        "physician_state": S,
-        "physician_zip5": S,
-
-        "teaching_hospital_id": S,
-        "teaching_hospital_name_raw": S,
-        "teaching_hospital_name_norm": S,
-        "teaching_hospital_state": S,
-        "teaching_hospital_zip5": S,
-
-        "amount_usd": F,
-        "payment_date": S,
-        "payment_quarter": I8,
-
-        "nature_of_payment": S,
-        "form_of_payment": S,
-        "payment_context": S,
-        "product_name": S,
-        "associated_covered_drug_or_device_flag": S,
-
-        "is_product_related": B,
-        "is_valid": B,
-        "drop_reason": S,
-    }
-
-    data = {}
-    for c in CANONICAL_COLS:
-        dt = dtypes.get(c, S)
-        data[c] = pd.Series([], dtype=dt)
-    return pd.DataFrame(data)
-
-
 CANONICAL_COLS = [
-    "record_id", "program_year", "dataset_type", "source_file",
-    "payer_name_raw", "payer_name_norm", "payer_id", "payer_state", "payer_country",
-    "payee_type", "payee_key",
-    "physician_npi", "physician_profile_id", "physician_name_raw", "physician_name_norm",
-    "physician_specialty", "physician_primary_type", "physician_state", "physician_zip5",
-    "teaching_hospital_id", "teaching_hospital_name_raw", "teaching_hospital_name_norm",
-    "teaching_hospital_state", "teaching_hospital_zip5",
-    "amount_usd", "payment_date", "payment_quarter",
-    "nature_of_payment", "form_of_payment", "payment_context",
-    "product_name", "associated_covered_drug_or_device_flag", "is_product_related",
-    "is_valid", "drop_reason",
+    "record_id",
+    "program_year",
+    "dataset_type",
+    "source_file",
+    "payer_name_raw",
+    "payer_name_norm",
+    "payer_id",
+    "payer_state",
+    "payer_country",
+    "payee_type",
+    "payee_key",
+    "physician_npi",
+    "physician_profile_id",
+    "physician_name_raw",
+    "physician_name_norm",
+    "physician_specialty",
+    "physician_primary_type",
+    "physician_state",
+    "physician_zip5",
+    "teaching_hospital_id",
+    "teaching_hospital_name_raw",
+    "teaching_hospital_name_norm",
+    "teaching_hospital_state",
+    "teaching_hospital_zip5",
+    "amount_usd",
+    "payment_date",
+    "payment_quarter",
+    "nature_of_payment",
+    "form_of_payment",
+    "payment_context",
+    "product_name",
+    "associated_covered_drug_or_device_flag",
+    "is_product_related",
+    "is_valid",
+    "drop_reason",
 ]
 
 CMS_COLUMN_MAPPINGS = {
@@ -472,18 +417,57 @@ CMS_COLUMN_MAPPINGS = {
 }
 
 
-def get_column_mapping(df: pd.DataFrame, dataset_type: str, custom_mapping: Optional[Dict[str, str]] = None) -> Dict[
-    str, Optional[str]]:
-    if custom_mapping:
-        base_mapping = custom_mapping
-    elif dataset_type in CMS_COLUMN_MAPPINGS:
-        base_mapping = CMS_COLUMN_MAPPINGS[dataset_type]
-    else:
+def make_canonical_meta(_: CleanConfig) -> pd.DataFrame:
+    S = "string[python]"
+    dtypes = {
+        "record_id": S,
+        "program_year": "Int16",
+        "dataset_type": S,
+        "source_file": S,
+        "payer_name_raw": S,
+        "payer_name_norm": S,
+        "payer_id": S,
+        "payer_state": S,
+        "payer_country": S,
+        "payee_type": S,
+        "payee_key": S,
+        "physician_npi": S,
+        "physician_profile_id": S,
+        "physician_name_raw": S,
+        "physician_name_norm": S,
+        "physician_specialty": S,
+        "physician_primary_type": S,
+        "physician_state": S,
+        "physician_zip5": S,
+        "teaching_hospital_id": S,
+        "teaching_hospital_name_raw": S,
+        "teaching_hospital_name_norm": S,
+        "teaching_hospital_state": S,
+        "teaching_hospital_zip5": S,
+        "amount_usd": "float64",
+        "payment_date": S,
+        "payment_quarter": "Int8",
+        "nature_of_payment": S,
+        "form_of_payment": S,
+        "payment_context": S,
+        "product_name": S,
+        "associated_covered_drug_or_device_flag": S,
+        "is_product_related": "bool",
+        "is_valid": "bool",
+        "drop_reason": S,
+    }
+    data = {c: pd.Series([], dtype=dtypes.get(c, S)) for c in CANONICAL_COLS}
+    return pd.DataFrame(data)
+
+
+def get_column_mapping(df: pd.DataFrame, dataset_type: str, custom_mapping: Optional[Dict[str, str]] = None) -> Dict[str, Optional[str]]:
+    base_mapping = custom_mapping if custom_mapping else CMS_COLUMN_MAPPINGS.get(dataset_type)
+    if base_mapping is None:
         raise ValueError(f"Unknown dataset_type: {dataset_type}")
 
     actual_cols = set(df.columns)
-    result = {}
-    missing_cols = []
+    result: Dict[str, Optional[str]] = {}
+    missing_cols: List[str] = []
     for key, col_name in base_mapping.items():
         if col_name in actual_cols:
             result[key] = col_name
@@ -497,17 +481,9 @@ def get_column_mapping(df: pd.DataFrame, dataset_type: str, custom_mapping: Opti
 
 
 def sanitize_for_parquet(pdf: pd.DataFrame) -> pd.DataFrame:
-    """
-    Ensure all columns are PyArrow-serializable:
-    - numeric columns: coerce to numeric
-    - bool columns: coerce to bool (nullable -> bool with False for missing if needed)
-    - string/object columns: convert any non-(str/None/NaN) to string, and normalize NaN->None
-    """
     if pdf is None or len(pdf) == 0:
-        # keep schema stable even for empty partitions
         return pdf
 
-    # Columns we want strongly typed
     float_cols = {"amount_usd"}
     int8_cols = {"payment_quarter"}
     bool_cols = {"is_product_related", "is_valid"}
@@ -515,45 +491,32 @@ def sanitize_for_parquet(pdf: pd.DataFrame) -> pd.DataFrame:
 
     for c in pdf.columns:
         s = pdf[c]
-
         if c in float_cols:
             pdf[c] = pd.to_numeric(s, errors="coerce").astype("float64")
             continue
-
         if c in bool_cols:
-            # Convert to real bool; missing -> False (or keep as pandas boolean if you prefer)
-            # Using pandas BooleanDtype can also work, but plain bool is simplest for parquet.
             if s.dtype.name == "boolean":
                 pdf[c] = s.fillna(False).astype(bool)
             else:
-                pdf[c] = s.astype(bool, errors="ignore")
-                # if that didn't convert cleanly, force via truthy mapping
-                if pdf[c].dtype != bool:
+                try:
                     pdf[c] = s.fillna(False).map(bool).astype(bool)
+                except Exception:
+                    pdf[c] = False
             continue
-
         if c in int8_cols:
-            # Coerce '1' -> 1 and None/NaN -> <NA>, then to pandas nullable Int8
             pdf[c] = pd.to_numeric(s, errors="coerce").astype("Int8")
             continue
-
         if c in intlike_cols:
-            # Convert numeric-looking strings to integers; allow <NA> for any bad values.
             pdf[c] = pd.to_numeric(s, errors="coerce").astype("Int16")
             continue
 
-        # Everything else: treat as string-ish object column.
-        # Replace NaN with None and stringify any weird Python objects.
         def _clean_cell(x):
             if x is None:
                 return None
-            # pandas missing
             if isinstance(x, float) and np.isnan(x):
                 return None
-            # already clean
             if isinstance(x, str):
                 return x
-            # for anything else (including <object object at ...>), stringify
             return str(x)
 
         pdf[c] = s.map(_clean_cell).astype("string[python]")
@@ -562,7 +525,6 @@ def sanitize_for_parquet(pdf: pd.DataFrame) -> pd.DataFrame:
 
 
 def build_payee_fields_vectorized(df: pd.DataFrame, colmap: Dict[str, Optional[str]]) -> Dict[str, pd.Series]:
-    # (This function is kept semantically identical to your current version.)
     n = len(df)
 
     hosp_id_col = colmap.get("hospital_id")
@@ -574,18 +536,18 @@ def build_payee_fields_vectorized(df: pd.DataFrame, colmap: Dict[str, Optional[s
     if hosp_id_col and hosp_id_col in df.columns:
         hosp_id_orig = df[hosp_id_col]
         hosp_id_mask = (
-                hosp_id_orig.notna()
-                & hosp_id_orig.astype(str).str.strip().ne("")
-                & hosp_id_orig.astype(str).str.lower().ne("nan")
+            hosp_id_orig.notna()
+            & hosp_id_orig.astype(str).str.strip().ne("")
+            & hosp_id_orig.astype(str).str.lower().ne("nan")
         )
         is_hospital |= hosp_id_mask
 
     if hosp_name_col and hosp_name_col in df.columns:
         hosp_name_orig = df[hosp_name_col]
         hosp_name_mask = (
-                hosp_name_orig.notna()
-                & hosp_name_orig.astype(str).str.strip().ne("")
-                & hosp_name_orig.astype(str).str.lower().ne("nan")
+            hosp_name_orig.notna()
+            & hosp_name_orig.astype(str).str.strip().ne("")
+            & hosp_name_orig.astype(str).str.lower().ne("nan")
         )
         is_hospital |= hosp_name_mask
 
@@ -593,30 +555,30 @@ def build_payee_fields_vectorized(df: pd.DataFrame, colmap: Dict[str, Optional[s
         recip_type = df[recipient_type_col].astype(str).str.upper()
         is_hospital |= recip_type.str.contains("HOSPITAL", na=False)
 
-    hosp_id_series = df[hosp_id_col].astype(
-        str).str.strip() if hosp_id_col and hosp_id_col in df.columns else pd.Series([None] * n, index=df.index)
+    hosp_id_series = (
+        df[hosp_id_col].astype(str).str.strip() if hosp_id_col and hosp_id_col in df.columns else pd.Series([None] * n, index=df.index)
+    )
     hosp_id_series = hosp_id_series.replace("", None).replace("nan", None)
 
-    hosp_name_raw = df[hosp_name_col].astype(
-        str).str.strip() if hosp_name_col and hosp_name_col in df.columns else pd.Series([None] * n, index=df.index)
+    hosp_name_raw = (
+        df[hosp_name_col].astype(str).str.strip() if hosp_name_col and hosp_name_col in df.columns else pd.Series([None] * n, index=df.index)
+    )
     hosp_name_raw = hosp_name_raw.replace("", None).replace("nan", None)
     hosp_name_norm = hosp_name_raw.map(lambda x: normalize_name(x) if x else None)
 
     state_col = colmap.get("phys_state")
     zip_col = colmap.get("phys_zip")
     hosp_state = df[state_col] if state_col and state_col in df.columns else pd.Series([None] * n, index=df.index)
-    hosp_zip5 = df[zip_col].map(normalize_zip5) if zip_col and zip_col in df.columns else pd.Series([None] * n,
-                                                                                                    index=df.index)
+    hosp_zip5 = df[zip_col].map(normalize_zip5) if zip_col and zip_col in df.columns else pd.Series([None] * n, index=df.index)
 
     npi_col = colmap.get("phys_npi")
     profile_col = colmap.get("phys_profile_id")
 
     npi_series = df[npi_col] if npi_col and npi_col in df.columns else pd.Series([None] * n, index=df.index)
-    npi_clean = npi_series.astype(str).str.replace(r"\\D+", "", regex=True)
+    npi_clean = npi_series.astype(str).str.replace(r"\D+", "", regex=True)
     npi_clean = npi_clean.replace("", None).replace("nan", None)
 
-    profile_series = df[profile_col] if profile_col and profile_col in df.columns else pd.Series([None] * n,
-                                                                                                 index=df.index)
+    profile_series = df[profile_col] if profile_col and profile_col in df.columns else pd.Series([None] * n, index=df.index)
     profile_clean = profile_series.astype(str).str.strip()
     profile_clean = profile_clean.replace("", None).replace("nan", None)
 
@@ -624,57 +586,79 @@ def build_payee_fields_vectorized(df: pd.DataFrame, colmap: Dict[str, Optional[s
     middle_col = colmap.get("phys_middle")
     last_col = colmap.get("phys_last")
 
-    first = df[first_col].astype(str).str.strip() if first_col and first_col in df.columns else pd.Series([""] * n,
-                                                                                                          index=df.index)
-    middle = df[middle_col].astype(str).str.strip() if middle_col and middle_col in df.columns else pd.Series([""] * n,
-                                                                                                              index=df.index)
-    last = df[last_col].astype(str).str.strip() if last_col and last_col in df.columns else pd.Series([""] * n,
-                                                                                                      index=df.index)
+    first = df[first_col].astype(str).str.strip() if first_col and first_col in df.columns else pd.Series([""] * n, index=df.index)
+    middle = df[middle_col].astype(str).str.strip() if middle_col and middle_col in df.columns else pd.Series([""] * n, index=df.index)
+    last = df[last_col].astype(str).str.strip() if last_col and last_col in df.columns else pd.Series([""] * n, index=df.index)
 
     first = first.replace("nan", "").replace("NaN", "")
     middle = middle.replace("nan", "").replace("NaN", "")
     last = last.replace("nan", "").replace("NaN", "")
 
-    phys_name_raw = (first + " " + middle + " " + last).str.replace(r"\\s+", " ", regex=True).str.strip()
+    phys_name_raw = (first + " " + middle + " " + last).str.replace(r"\s+", " ", regex=True).str.strip()
     phys_name_raw = phys_name_raw.replace("", None).replace("nan", None).replace("NaN", None)
     phys_name_norm = phys_name_raw.map(lambda x: normalize_name(x) if x else None)
 
     specialty_col = colmap.get("phys_specialty")
     primary_type_col = colmap.get("phys_primary_type")
-    phys_specialty = df[specialty_col] if specialty_col and specialty_col in df.columns else pd.Series([None] * n,
-                                                                                                       index=df.index)
-    phys_primary_type = df[primary_type_col] if primary_type_col and primary_type_col in df.columns else pd.Series(
-        [None] * n, index=df.index)
+    phys_specialty = df[specialty_col] if specialty_col and specialty_col in df.columns else pd.Series([None] * n, index=df.index)
+    phys_primary_type = df[primary_type_col] if primary_type_col and primary_type_col in df.columns else pd.Series([None] * n, index=df.index)
     phys_state = df[state_col] if state_col and state_col in df.columns else pd.Series([None] * n, index=df.index)
-    phys_zip5 = df[zip_col].map(normalize_zip5) if zip_col and zip_col in df.columns else pd.Series([None] * n,
-                                                                                                    index=df.index)
+    phys_zip5 = df[zip_col].map(normalize_zip5) if zip_col and zip_col in df.columns else pd.Series([None] * n, index=df.index)
 
+    # Build payee keys with minimal per-row Python work to cut memory overhead on large partitions
     payee_key = pd.Series([None] * n, index=df.index, dtype=object)
     payee_type = pd.Series(["physician"] * n, index=df.index)
     payee_type = payee_type.where(~is_hospital, "teaching_hospital")
 
-    for idx in df.index[is_hospital]:
-        hid = hosp_id_series.loc[idx]
-        if pd.notna(hid) and str(hid).strip() and str(hid).lower() != "nan":
-            payee_key.loc[idx] = f"HOSP_ID:{hid}"
-        else:
-            hname = hosp_name_norm.loc[idx]
-            hzip = hosp_zip5.loc[idx]
-            payee_key.loc[
-                idx] = f"HOSP_NAMEZIP:{stable_hash_hex([hname if pd.notna(hname) else None, hzip if pd.notna(hzip) else None])}"
+    hosp_idx = df.index[is_hospital]
+    if len(hosp_idx):
+        hosp_has_id = (
+            hosp_id_series.loc[hosp_idx].notna()
+            & hosp_id_series.loc[hosp_idx].astype(str).str.strip().ne("")
+            & hosp_id_series.loc[hosp_idx].astype(str).str.lower().ne("nan")
+        )
+        if hosp_has_id.any():
+            payee_key.loc[hosp_idx[hosp_has_id]] = (
+                "HOSP_ID:" + hosp_id_series.loc[hosp_idx[hosp_has_id]].astype(str)
+            )
+        hosp_hash_idx = hosp_idx[~hosp_has_id]
+        if len(hosp_hash_idx):
+            hname = hosp_name_norm.loc[hosp_hash_idx]
+            hzip = hosp_zip5.loc[hosp_hash_idx]
+            payee_key.loc[hosp_hash_idx] = [
+                f"HOSP_NAMEZIP:{stable_hash_hex([hn if pd.notna(hn) else None, hz if pd.notna(hz) else None])}"
+                for hn, hz in zip(hname, hzip)
+            ]
 
-    for idx in df.index[~is_hospital]:
-        npi = npi_clean.loc[idx]
-        prof = profile_clean.loc[idx]
-        if pd.notna(npi) and str(npi).strip() and str(npi).lower() != "nan":
-            payee_key.loc[idx] = f"PHYS_NPI:{npi}"
-        elif pd.notna(prof) and str(prof).strip() and str(prof).lower() != "nan":
-            payee_key.loc[idx] = f"PHYS_PROF:{prof}"
-        else:
-            pname = phys_name_norm.loc[idx]
-            pzip = phys_zip5.loc[idx]
-            payee_key.loc[
-                idx] = f"PHYS_NAMEZIP:{stable_hash_hex([pname if pd.notna(pname) else None, pzip if pd.notna(pzip) else None])}"
+    phys_idx = df.index[~is_hospital]
+    if len(phys_idx):
+        npi_clean_phys = npi_clean.loc[phys_idx]
+        prof_clean_phys = profile_clean.loc[phys_idx]
+        npi_mask = (
+            npi_clean_phys.notna()
+            & npi_clean_phys.astype(str).str.strip().ne("")
+            & npi_clean_phys.astype(str).str.lower().ne("nan")
+        )
+        prof_mask = (
+            prof_clean_phys.notna()
+            & prof_clean_phys.astype(str).str.strip().ne("")
+            & prof_clean_phys.astype(str).str.lower().ne("nan")
+        )
+
+        if npi_mask.any():
+            payee_key.loc[phys_idx[npi_mask]] = "PHYS_NPI:" + npi_clean_phys.loc[phys_idx[npi_mask]].astype(str)
+        prof_only_idx = phys_idx[~npi_mask & prof_mask]
+        if len(prof_only_idx):
+            payee_key.loc[prof_only_idx] = "PHYS_PROF:" + prof_clean_phys.loc[prof_only_idx].astype(str)
+
+        hash_idx = phys_idx[~npi_mask & ~prof_mask]
+        if len(hash_idx):
+            pname = phys_name_norm.loc[hash_idx]
+            pzip = phys_zip5.loc[hash_idx]
+            payee_key.loc[hash_idx] = [
+                f"PHYS_NAMEZIP:{stable_hash_hex([pn if pd.notna(pn) else None, pz if pd.notna(pz) else None])}"
+                for pn, pz in zip(pname, pzip)
+            ]
 
     return {
         "payee_type": payee_type,
@@ -738,10 +722,7 @@ def canonicalize_partition(df: pd.DataFrame, cfg: CleanConfig, source_file: str)
 
     flag_clean = flag.astype(str).str.strip().str.upper()
     is_product_related = (
-            flag_clean.notna()
-            & (flag_clean != "")
-            & (flag_clean != "NAN")
-            & (flag_clean != "NONE")
+        flag_clean.notna() & (flag_clean != "") & (flag_clean != "NAN") & (flag_clean != "NONE")
     )
 
     def quarter_from_iso(d: Optional[str]) -> Optional[int]:
@@ -756,12 +737,12 @@ def canonicalize_partition(df: pd.DataFrame, cfg: CleanConfig, source_file: str)
     payment_quarter = payment_date.map(quarter_from_iso)
 
     is_valid = (
-            amount.notna()
-            & (amount >= 0)
-            & payer_norm.notna()
-            & (payer_norm.astype(str).str.len() > 0)
-            & payee_fields["payee_key"].notna()
-            & (payee_fields["payee_key"].astype(str).str.len() > 0)
+        amount.notna()
+        & (amount >= 0)
+        & payer_norm.notna()
+        & (payer_norm.astype(str).str.len() > 0)
+        & payee_fields["payee_key"].notna()
+        & (payee_fields["payee_key"].astype(str).str.len() > 0)
     )
 
     drop_reason = pd.Series([None] * len(df), dtype="string", index=df.index)
@@ -769,67 +750,66 @@ def canonicalize_partition(df: pd.DataFrame, cfg: CleanConfig, source_file: str)
     drop_reason = drop_reason.mask(amount.notna() & (amount < 0), "negative_amount")
     drop_reason = drop_reason.mask(payer_norm.isna() | (payer_norm.astype(str).str.len() == 0), "missing_payer")
     drop_reason = drop_reason.mask(
-        payee_fields["payee_key"].isna() | (payee_fields["payee_key"].astype(str).str.len() == 0), "missing_payee")
+        payee_fields["payee_key"].isna() | (payee_fields["payee_key"].astype(str).str.len() == 0),
+        "missing_payee",
+    )
     drop_reason = drop_reason.where(~is_valid, drop_reason)
 
-    # record_id (kept identical to your existing semantics; loop is per-partition)
-    hash_inputs = []
+    # record_id (kept identical semantics; per-partition loop)
+    hash_inputs: List[List[Optional[str]]] = []
     for i in range(len(payer_norm)):
-        hash_inputs.append([
-            str(cfg.program_year),
-            cfg.dataset_type,
-            payer_norm.iloc[i],
-            payee_fields["payee_key"].iloc[i],
-            str(amount.iloc[i]) if pd.notna(amount.iloc[i]) else None,
-            payment_date.iloc[i],
-            str(nature.iloc[i]) if pd.notna(nature.iloc[i]) else None,
-        ])
+        hash_inputs.append(
+            [
+                str(cfg.program_year),
+                cfg.dataset_type,
+                payer_norm.iloc[i],
+                payee_fields["payee_key"].iloc[i],
+                str(amount.iloc[i]) if pd.notna(amount.iloc[i]) else None,
+                payment_date.iloc[i],
+                str(nature.iloc[i]) if pd.notna(nature.iloc[i]) else None,
+            ]
+        )
     record_id = pd.Series([stable_hash_hex(h) for h in hash_inputs], index=df.index, dtype="string")
 
-    out = pd.DataFrame({
-        "record_id": record_id,
-        "program_year": np.int16(cfg.program_year),
-        "dataset_type": cfg.dataset_type,
-        "source_file": source_file if cfg.keep_source_file else None,
-
-        "payer_name_raw": payer_raw.astype("string[python]"),
-        "payer_name_norm": payer_norm.astype("string[python]"),
-        "payer_id": payer_id.astype("string", errors="ignore"),
-        "payer_state": payer_state.astype("string", errors="ignore"),
-        "payer_country": payer_country.astype("string", errors="ignore"),
-
-        "payee_type": payee_fields["payee_type"].astype("string[python]"),
-        "payee_key": payee_fields["payee_key"].astype("string[python]"),
-
-        "physician_npi": payee_fields["physician_npi"].astype("string[python]"),
-        "physician_profile_id": payee_fields["physician_profile_id"].astype("string", errors="ignore"),
-        "physician_name_raw": payee_fields["physician_name_raw"].astype("string", errors="ignore"),
-        "physician_name_norm": payee_fields["physician_name_norm"].astype("string", errors="ignore"),
-        "physician_specialty": payee_fields["physician_specialty"].astype("string", errors="ignore"),
-        "physician_primary_type": payee_fields["physician_primary_type"].astype("string", errors="ignore"),
-        "physician_state": payee_fields["physician_state"].astype("string", errors="ignore"),
-        "physician_zip5": payee_fields["physician_zip5"].astype("string", errors="ignore"),
-
-        "teaching_hospital_id": payee_fields["teaching_hospital_id"].astype("string", errors="ignore"),
-        "teaching_hospital_name_raw": payee_fields["teaching_hospital_name_raw"].astype("string", errors="ignore"),
-        "teaching_hospital_name_norm": payee_fields["teaching_hospital_name_norm"].astype("string", errors="ignore"),
-        "teaching_hospital_state": payee_fields["teaching_hospital_state"].astype("string", errors="ignore"),
-        "teaching_hospital_zip5": payee_fields["teaching_hospital_zip5"].astype("string", errors="ignore"),
-
-        "amount_usd": amount,
-        "payment_date": pd.Series(payment_date, index=df.index, dtype="string[python]"),
-        "payment_quarter": payment_quarter,
-
-        "nature_of_payment": nature.astype("string", errors="ignore"),
-        "form_of_payment": form.astype("string", errors="ignore"),
-        "payment_context": context.astype("string", errors="ignore"),
-        "product_name": product.astype("string", errors="ignore"),
-        "associated_covered_drug_or_device_flag": flag.astype("string", errors="ignore"),
-        "is_product_related": is_product_related.astype(bool),
-
-        "is_valid": is_valid.astype(bool),
-        "drop_reason": drop_reason.astype("string", errors="ignore"),
-    })
+    out = pd.DataFrame(
+        {
+            "record_id": record_id,
+            "program_year": np.int16(cfg.program_year),
+            "dataset_type": cfg.dataset_type,
+            "source_file": source_file if cfg.keep_source_file else None,
+            "payer_name_raw": payer_raw.astype("string[python]"),
+            "payer_name_norm": payer_norm.astype("string[python]"),
+            "payer_id": payer_id.astype("string", errors="ignore"),
+            "payer_state": payer_state.astype("string", errors="ignore"),
+            "payer_country": payer_country.astype("string", errors="ignore"),
+            "payee_type": payee_fields["payee_type"].astype("string[python]"),
+            "payee_key": payee_fields["payee_key"].astype("string[python]"),
+            "physician_npi": payee_fields["physician_npi"].astype("string[python]"),
+            "physician_profile_id": payee_fields["physician_profile_id"].astype("string", errors="ignore"),
+            "physician_name_raw": payee_fields["physician_name_raw"].astype("string", errors="ignore"),
+            "physician_name_norm": payee_fields["physician_name_norm"].astype("string", errors="ignore"),
+            "physician_specialty": payee_fields["physician_specialty"].astype("string", errors="ignore"),
+            "physician_primary_type": payee_fields["physician_primary_type"].astype("string", errors="ignore"),
+            "physician_state": payee_fields["physician_state"].astype("string", errors="ignore"),
+            "physician_zip5": payee_fields["physician_zip5"].astype("string", errors="ignore"),
+            "teaching_hospital_id": payee_fields["teaching_hospital_id"].astype("string", errors="ignore"),
+            "teaching_hospital_name_raw": payee_fields["teaching_hospital_name_raw"].astype("string", errors="ignore"),
+            "teaching_hospital_name_norm": payee_fields["teaching_hospital_name_norm"].astype("string", errors="ignore"),
+            "teaching_hospital_state": payee_fields["teaching_hospital_state"].astype("string", errors="ignore"),
+            "teaching_hospital_zip5": payee_fields["teaching_hospital_zip5"].astype("string", errors="ignore"),
+            "amount_usd": amount,
+            "payment_date": pd.Series(payment_date, index=df.index, dtype="string[python]"),
+            "payment_quarter": payment_quarter,
+            "nature_of_payment": nature.astype("string", errors="ignore"),
+            "form_of_payment": form.astype("string", errors="ignore"),
+            "payment_context": context.astype("string", errors="ignore"),
+            "product_name": product.astype("string", errors="ignore"),
+            "associated_covered_drug_or_device_flag": flag.astype("string", errors="ignore"),
+            "is_product_related": is_product_related.astype(bool),
+            "is_valid": is_valid.astype(bool),
+            "drop_reason": drop_reason.astype("string", errors="ignore"),
+        }
+    )
 
     for c in CANONICAL_COLS:
         if c not in out.columns:
@@ -838,121 +818,69 @@ def canonicalize_partition(df: pd.DataFrame, cfg: CleanConfig, source_file: str)
     return out[CANONICAL_COLS]
 
 
+# ---------------------------
+# Sampling helpers
+# ---------------------------
+
+
+def sampling_mask_from_record_ids(record_ids: pd.Series, fraction: float, seed: Optional[int], method: str) -> pd.Series:
+    """Return deterministic boolean mask selecting approximately `fraction` of rows.
+
+    method:
+      - sha1: matches original semantics (rid+salt -> sha1 -> uniform)
+      - fast_hash: uses pandas hash_pandas_object (faster, deterministic, but not sha1-identical)
+
+    NOTE: If you must be bit-identical to sequential, keep method='sha1'.
+    """
+    if fraction >= 0.9999:
+        return pd.Series([True] * len(record_ids), index=record_ids.index)
+    salt = "" if seed is None else str(seed)
+
+    rid = record_ids.astype(str)
+
+    if method.lower() == "fast_hash":
+        # Deterministic within pandas; faster than per-row sha1.
+        # Map to [0,1) via modulo.
+        h = pd.util.hash_pandas_object(rid + salt, index=False).astype("uint64")
+        vals = (h % np.uint64(10_000_000)).astype("uint64")
+        return pd.Series(vals.values < int(fraction * 10_000_000), index=record_ids.index)
+
+    # sha1 (sequential-equivalent): still Python-level but kept for correctness.
+    hashes = rid.map(lambda x: hashlib.sha1((x + salt).encode("utf-8")).hexdigest())
+    values = hashes.map(lambda hx: int(hx[:15], 16) / float(16**15))
+    return values < fraction
+
+
+# ---------------------------
+# Phase runner
+# ---------------------------
+
+
 def ensure_dir(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
-def _apply_scale_filter(ddf, cfg: CleanConfig):
-    """Apply dataset scaling axis in Phase 1 only.
-
-    Supported:
-      - fraction: deterministic hash-based sampling (stable across runs for the same raw rows)
-      - months: keep rows with payment_date month <= scale_value (best-effort using raw date columns)
-    """
-    if not cfg.scale_mode or cfg.scale_mode == "none" or cfg.scale_value in (None, "", 1, 1.0):
-        return ddf, {"mode": "none", "value": None, "rows_kept": None}
-
-    mode = str(cfg.scale_mode).lower().strip()
+def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
+    if not cfg.use_dask:
+        raise ValueError("use_dask=false is not supported in this concurrent CPU script (intentionally).")
 
     try:
+        import dask
         import dask.dataframe as dd
-    except Exception:
-        dd = None
+        from dask import compute
+        from dask.diagnostics import ProgressBar
+    except Exception as e:
+        raise ImportError("Dask is required for concurrent CPU Phase 1. Install: pip install dask[dataframe]") from e
 
-    # Best-effort raw date column candidates (before canonicalization)
-    date_candidates = [
-        "Date_of_Payment",
-        "date_of_payment",
-        "Payment_Date",
-        "payment_date",
-    ]
-
-    if mode == "months":
-        try:
-            months = int(cfg.scale_value)
-        except Exception as e:
-            raise ValueError(
-                f"scale_value must be an integer 1-12 for scale_mode=months. Got: {cfg.scale_value}") from e
-        months = max(1, min(12, months))
-        date_col = next((c for c in date_candidates if c in ddf.columns), None)
-        if date_col is None:
-            # Cannot apply month slicing without a date column; fall back to no scaling.
-            return ddf, {"mode": "months", "value": months, "rows_kept": None, "note": "no_date_column_found"}
-        dt = ddf[date_col]
-        # Let Dask infer parsing; errors become NaT and are dropped by filter.
-        if dd is None:
-            return ddf, {"mode": "months", "value": months, "rows_kept": None, "note": "dask_not_available"}
-        dt_parsed = dd.to_datetime(dt, errors="coerce", infer_datetime_format=True)
-        ddf2 = ddf[dt_parsed.dt.month <= months]
-        return ddf2, {"mode": "months", "value": months, "rows_kept": None, "date_col": date_col}
-
-    if mode != "fraction":
-        # Unknown mode -> no scaling
-        return ddf, {"mode": mode, "value": cfg.scale_value, "rows_kept": None, "note": "unsupported_mode"}
-
-    # fraction mode: deterministic hash filter
-    frac = float(cfg.scale_value)
-    if frac <= 0.0:
-        return ddf.head(0), {"mode": "fraction", "value": frac, "rows_kept": 0}
-    if frac >= 1.0:
-        return ddf, {"mode": "fraction", "value": frac, "rows_kept": None}
-
-    base = 10000
-    threshold = int(frac * base)
-
-    # Choose stable key columns: user-provided or first available in common identifiers
-    common_keys = [
-        "Record_ID",
-        "record_id",
-        "General_Payment_ID",
-        "Research_Payment_ID",
-        "Ownership_ID",
-        "Submitting_Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID",
-        "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID",
-    ]
-    key_cols = list(cfg.scale_key_cols) if cfg.scale_key_cols else [c for c in common_keys if c in ddf.columns]
-    if not key_cols:
-        # fallback: use a small set of columns (excluding source file)
-        key_cols = [c for c in ddf.columns if c != "__source_file"][:3]
-
-    def _hash_filter(pdf: pd.DataFrame) -> pd.DataFrame:
-        if pdf.empty:
-            return pdf
-        parts = []
-        for c in key_cols:
-            if c in pdf.columns:
-                parts.append(pdf[c].fillna("").astype(str))
-        if not parts:
-            return pdf.iloc[0:0]
-        key_series = parts[0]
-        for s in parts[1:]:
-            key_series = key_series.str.cat(s, sep="|")
-        # deterministic sha1 -> modulo
-        mask = []
-        for v in key_series.tolist():
-            h = hashlib.sha1(v.encode("utf-8", errors="ignore")).hexdigest()
-            mask.append(int(h[:8], 16) % base < threshold)
-        return pdf.loc[mask]
-
-    meta = ddf._meta
-    ddf2 = ddf.map_partitions(_hash_filter, meta=meta)
-    return ddf2, {"mode": "fraction", "value": frac, "threshold": threshold, "base": base, "key_cols": key_cols,
-                  "rows_kept": None}
-
-
-def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
     t_phase_start = time.perf_counter()
     timings: Dict[str, float] = {}
+
     out_dir = Path(cfg.output_dir)
     ensure_dir(str(out_dir))
 
-    # Fingerprint + config snapshot
+    # Save config snapshot
     if config_path:
-        fingerprint = create_dataset_fingerprint(cfg, config_path)
-        with open(out_dir / "dataset_fingerprint.json", "w", encoding="utf-8") as f:
-            json.dump(fingerprint, f, indent=2)
-        with open(config_path, "r", encoding="utf-8") as src, open(out_dir / "config_used.yaml", "w",
-                                                                   encoding="utf-8") as dst:
+        with open(config_path, "r", encoding="utf-8") as src, open(out_dir / "config_used.yaml", "w", encoding="utf-8") as dst:
             dst.write(src.read())
 
     clean_dir = out_dir / "payments_clean"
@@ -961,7 +889,6 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
     if cfg.write_format != "parquet":
         raise ValueError("Concurrent pipeline expects parquet output (write_format=parquet).")
 
-    # Clear existing outputs safely (Dask parquet datasets are directories)
     if clean_dir.exists():
         shutil.rmtree(clean_dir, ignore_errors=True)
     if rej_dir.exists() and not cfg.skip_rejected:
@@ -971,195 +898,340 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
     if not cfg.skip_rejected:
         ensure_dir(str(rej_dir))
 
-    # Dask path
-    if cfg.use_dask:
-        try:
-            import dask
-            import dask.dataframe as dd
-        except Exception as e:
-            raise ImportError(
-                "Dask is required for concurrent CPU Phase 1. Install: pip install dask[dataframe]") from e
+    # Configure dask scheduler and worker pool (threads)
+    scheduler = (cfg.scheduler or "threads").lower().strip()
+    if scheduler == "threads" and cfg.max_workers and int(cfg.max_workers) > 0:
+        pool = ThreadPoolExecutor(max_workers=int(cfg.max_workers))
+        dask.config.set(pool=pool)
+        dask.config.set(scheduler="threads")
+        logging.info("[Phase 1] Dask scheduler=threads pool_size=%d", int(cfg.max_workers))
+    else:
+        dask.config.set(scheduler=scheduler)
+        logging.info("[Phase 1] Dask scheduler=%s", scheduler)
 
-        t_read_build_start = time.perf_counter()
+    # Read CSV(s)
+    t_read_start = time.perf_counter()
+    logging.info("[Phase 1] Concurrent cleaning started | max_workers=%s | blocksize=%s", cfg.max_workers, cfg.blocksize)
 
-        # Build a single ddf across all files; include source file column if requested
-        # We keep dtype=str to preserve determinism before parsing.
-        ddf_list = []
-        for fpath in cfg.input_files:
-            ddf = dd.read_csv(
-                fpath,
-                dtype=str,
-                blocksize=cfg.blocksize,
-                assume_missing=True,
-                encoding="utf-8",
+    ddf_list = []
+    for fpath in cfg.input_files:
+        part = dd.read_csv(
+            fpath,
+            dtype=str,
+            blocksize=cfg.blocksize,
+            assume_missing=True,
+            encoding="utf-8",
+        )
+        part["__source_file"] = Path(fpath).name if cfg.keep_source_file else ""
+        ddf_list.append(part)
+
+    ddf = dd.concat(ddf_list, axis=0, interleave_partitions=True)
+    if cfg.dask_npartitions and cfg.dask_npartitions > 0:
+        ddf = ddf.repartition(npartitions=int(cfg.dask_npartitions))
+
+    # Optional early sampling on raw dataframe to shrink work up-front
+    do_sampling = cfg.sampling_fraction < 0.9999
+    sampling_stage = (cfg.sampling_stage or "canonical").lower().strip()
+    if do_sampling and sampling_stage == "raw":
+        logging.info(
+            "[Phase 1] Applying RAW sampling fraction=%.4f seed=%s (pre-canonical)",
+            cfg.sampling_fraction,
+            cfg.sampling_seed,
+        )
+        ddf = ddf.sample(frac=float(cfg.sampling_fraction), random_state=cfg.sampling_seed, replace=False)
+
+    logging.info("[Phase 1] Read complete | partitions=%d", ddf.npartitions)
+
+    # Canonicalize
+    t_canon_start = time.perf_counter()
+    meta = make_canonical_meta(cfg)
+
+    def _canon_part(pdf: pd.DataFrame) -> pd.DataFrame:
+        # Avoid expensive mode() unless needed; most of the time __source_file is constant per partition.
+        source_file = ""
+        if cfg.keep_source_file and "__source_file" in pdf.columns and len(pdf):
+            try:
+                source_file = str(pdf["__source_file"].iloc[0])
+            except Exception:
+                source_file = ""
+        return canonicalize_partition(
+            pdf.drop(columns=["__source_file"], errors="ignore"),
+            cfg,
+            source_file=source_file,
+        )
+
+    canon = ddf.map_partitions(_canon_part, meta=meta)
+
+    # Optional sampling
+    if do_sampling and sampling_stage == "canonical":
+        logging.info(
+            "[Phase 1] Applying sampling fraction=%.4f seed=%s method=%s",
+            cfg.sampling_fraction,
+            cfg.sampling_seed,
+            cfg.sampling_method,
+        )
+
+        def _sample_part(pdf: pd.DataFrame) -> pd.DataFrame:
+            if len(pdf) == 0:
+                return pdf
+            mask = sampling_mask_from_record_ids(
+                pdf["record_id"],
+                float(cfg.sampling_fraction),
+                cfg.sampling_seed,
+                cfg.sampling_method,
             )
-            if cfg.keep_source_file:
-                ddf["__source_file"] = Path(fpath).name
-            else:
-                ddf["__source_file"] = ""
-            ddf_list.append(ddf)
+            return pdf.loc[mask]
 
-        ddf = dd.concat(ddf_list, axis=0, interleave_partitions=True)
-        if cfg.dask_npartitions and cfg.dask_npartitions > 0:
-            ddf = ddf.repartition(npartitions=int(cfg.dask_npartitions))
+        canon = canon.map_partitions(_sample_part, meta=meta)
 
-        timings["t_read_build_graph"] = round(time.perf_counter() - t_read_build_start, 4)
+    # Schema guard
+    missing = [c for c in CANONICAL_COLS if c not in canon.columns]
+    if missing:
+        raise RuntimeError(
+            "Canonical schema mismatch after map_partitions. "
+            f"Missing columns: {missing}. canon.columns={list(canon.columns)}"
+        )
 
-        # Optional dataset scaling axis (fraction or months). Applied before canonicalization.
-        t_scale_start = time.perf_counter()
-        ddf, scale_info = _apply_scale_filter(ddf, cfg)
-        timings["t_scale_filter_graph"] = round(time.perf_counter() - t_scale_start, 4)
+    timings["t_canon_graph"] = round(time.perf_counter() - t_canon_start, 4)
+    logging.info("[Phase 1] Canonicalization graph built | partitions=%d", canon.npartitions)
 
-        t_canon_graph_start = time.perf_counter()
-        # Apply canonicalization per partition (pandas)
-        # We need meta to keep Dask happy.
-        meta = make_canonical_meta(cfg)
+    valid = canon[canon["is_valid"] == True]
+    rejected = canon[canon["is_valid"] == False]
 
-        def _canon_part(pdf: pd.DataFrame) -> pd.DataFrame:
-            source_file = ""
-            if "__source_file" in pdf.columns and len(pdf):
-                # mode() can be empty in weird partitions; be defensive
-                try:
-                    m = pdf["__source_file"].mode()
-                    source_file = str(m.iloc[0]) if len(m) else ""
-                except Exception:
-                    source_file = ""
-            return canonicalize_partition(
-                pdf.drop(columns=["__source_file"], errors="ignore"),
-                cfg,
-                source_file=source_file,
-            )
+    # Sanitize
+    t_sanitize_start = time.perf_counter()
+    valid = valid.map_partitions(sanitize_for_parquet, meta=make_canonical_meta(cfg))
+    if not cfg.skip_rejected:
+        rejected = rejected.map_partitions(sanitize_for_parquet, meta=make_canonical_meta(cfg))
+    timings["t_sanitize_graph"] = round(time.perf_counter() - t_sanitize_start, 4)
 
-        canon = ddf.map_partitions(_canon_part, meta=meta)
+    # Persist ONCE so writes + stats reuse the same materialized partitions (avoids recomputation)
+    t_persist_start = time.perf_counter()
+    if cfg.persist:
+        logging.info("[Phase 1] Persisting sanitized datasets (enables reuse for writes+stats)...")
+        with ProgressBar():
+            valid_p = valid.persist()
+            rej_p = rejected.persist() if not cfg.skip_rejected else None
+        timings["t_persist"] = round(time.perf_counter() - t_persist_start, 4)
+    else:
+        logging.info("[Phase 1] Skipping persist (memory-saving mode); writes/stats will compute from graph")
+        valid_p = valid
+        rej_p = rejected if not cfg.skip_rejected else None
+        timings["t_persist"] = 0.0
 
-        # Hard fail early if Dask schema got corrupted (this is what caused your KeyError).
-        missing = [c for c in CANONICAL_COLS if c not in canon.columns]
-        if missing:
-            raise RuntimeError(
-                "Canonical schema mismatch after map_partitions.\n"
-                f"Missing columns: {missing}\n"
-                f"canon.columns: {list(canon.columns)}\n"
-                f"canon._meta columns: {list(getattr(canon, '_meta', pd.DataFrame()).columns)}"
-            )
+    # Write Parquet
+    t_write_start = time.perf_counter()
+    logging.info("[Phase 1] Writing clean dataset...")
+    with ProgressBar():
+        valid_p.to_parquet(str(clean_dir), engine="pyarrow", write_index=False)
+    timings["t_write_parquet_valid"] = round(time.perf_counter() - t_write_start, 4)
 
-        valid = canon[canon["is_valid"] == True]
-        rejected = canon[canon["is_valid"] == False]
+    if not cfg.skip_rejected:
+        t_write_rej = time.perf_counter()
+        logging.info("[Phase 1] Writing rejected dataset...")
+        with ProgressBar():
+            assert rej_p is not None
+            rej_p.to_parquet(str(rej_dir), engine="pyarrow", write_index=False)
+        timings["t_write_parquet_rejected"] = round(time.perf_counter() - t_write_rej, 4)
 
-        timings["t_canon_graph"] = round(time.perf_counter() - t_canon_graph_start, 4)
+    # Stats (single compute)
+    rows_in_val = rows_after_sampling_val = rows_valid_val = rows_rej_val = None
+    amt_min_val = amt_mean_val = amt_median_val = amt_max_val = None
+    phys_val = hosp_val = 0
+    phys_missing_npi_val = phys_missing_prof_val = hosp_missing_id_val = 0
+    pandas_stats_used = False
 
-        # Sanitize partitions to avoid pyarrow failures on weird python objects
-        valid = valid.map_partitions(sanitize_for_parquet, meta=make_canonical_meta(cfg))
-        if not cfg.skip_rejected:
-            rejected = rejected.map_partitions(sanitize_for_parquet, meta=make_canonical_meta(cfg))
-
-        # Write datasets
-        t_write_start = time.perf_counter()
-        valid.to_parquet(str(clean_dir), engine="pyarrow", write_index=False)
-        timings["t_write_parquet_valid"] = round(time.perf_counter() - t_write_start, 4)
-
-        if not cfg.skip_rejected:
-            t_write_rej_start = time.perf_counter()
-            rejected.to_parquet(str(rej_dir), engine="pyarrow", write_index=False)
-            timings["t_write_parquet_rejected"] = round(time.perf_counter() - t_write_rej_start, 4)
-
-        # Stats (computed via reductions)
+    if cfg.compute_stats:
         t_stats_start = time.perf_counter()
-        rows_in = int(ddf.shape[0].compute())
-        rows_valid = int(valid.shape[0].compute())
-        rows_rej = int(rejected.shape[0].compute()) if not cfg.skip_rejected else 0
+        logging.info("[Phase 1] Computing stats (single-pass reductions)...")
 
-        amt = dd.to_numeric(valid["amount_usd"], errors="coerce")
-        amt_min = float(amt.min().compute()) if rows_valid else None
-        amt_mean = float(amt.mean().compute()) if rows_valid else None
-        amt_median = float(amt.quantile(0.5).compute()) if rows_valid else None
-        amt_max = float(amt.max().compute()) if rows_valid else None
+        # Decide pandas fast path based on rows_valid (cheap on persisted)
+        if cfg.stats_pandas_threshold and int(cfg.stats_pandas_threshold) > 0:
+            with ProgressBar():
+                rows_valid_val = int(valid_p.shape[0].compute())
+            if rows_valid_val <= int(cfg.stats_pandas_threshold):
+                pandas_stats_used = True
+                vpdf_pd = valid_p.compute()
+                rows_in_val = int(ddf.shape[0].compute())
+                rows_after_sampling_val = int(canon.shape[0].compute())
+                rows_rej_val = 0
+                if not cfg.skip_rejected and rej_p is not None:
+                    rows_rej_val = int(rej_p.shape[0].compute())
 
-        # payee breakdown
-        phys = int((valid["payee_type"] == "physician").sum().compute()) if rows_valid else 0
-        hosp = int((valid["payee_type"] == "teaching_hospital").sum().compute()) if rows_valid else 0
+                amt_pd = pd.to_numeric(vpdf_pd["amount_usd"], errors="coerce")
+                if len(amt_pd):
+                    amt_min_val = float(amt_pd.min())
+                    amt_mean_val = float(amt_pd.mean())
+                    amt_max_val = float(amt_pd.max())
+                    if cfg.stats_compute_median:
+                        amt_median_val = float(amt_pd.median())
 
-        # missingness computed on correct subgroup (same semantics as your sequential version)
-        vpdf = valid[["payee_type", "physician_npi", "physician_profile_id", "teaching_hospital_id"]]
-        phys_missing_npi = int(
-            vpdf[vpdf["payee_type"] == "physician"]["physician_npi"].isna().sum().compute()) if phys else 0
-        phys_missing_prof = int(
-            vpdf[vpdf["payee_type"] == "physician"]["physician_profile_id"].isna().sum().compute()) if phys else 0
-        hosp_missing_id = int(vpdf[vpdf["payee_type"] == "teaching_hospital"][
-                                  "teaching_hospital_id"].isna().sum().compute()) if hosp else 0
+                phys_val = int((vpdf_pd["payee_type"] == "physician").sum())
+                hosp_val = int((vpdf_pd["payee_type"] == "teaching_hospital").sum())
+                if phys_val:
+                    phys_missing_npi_val = int(vpdf_pd[vpdf_pd["payee_type"] == "physician"]["physician_npi"].isna().sum())
+                    phys_missing_prof_val = int(vpdf_pd[vpdf_pd["payee_type"] == "physician"]["physician_profile_id"].isna().sum())
+                if hosp_val:
+                    hosp_missing_id_val = int(vpdf_pd[vpdf_pd["payee_type"] == "teaching_hospital"]["teaching_hospital_id"].isna().sum())
+
+        if not pandas_stats_used:
+            # Build lazy expressions off persisted frames (important)
+            rows_in_expr = ddf.shape[0]
+            rows_after_sampling_expr = canon.shape[0]
+            rows_valid_expr = valid_p.shape[0]
+            rows_rej_expr = rej_p.shape[0] if (not cfg.skip_rejected and rej_p is not None) else 0
+
+            import dask.dataframe as dd  # local
+
+            amt_series = dd.to_numeric(valid_p["amount_usd"], errors="coerce")
+            amt_min_expr = amt_series.min()
+            amt_mean_expr = amt_series.mean()
+            amt_max_expr = amt_series.max()
+
+            compute_median = bool(cfg.stats_compute_median)
+            median_method = (cfg.stats_median_method or "exact").lower()
+            if compute_median:
+                # "approx" can still map to quantile in many dask versions; kept for future extension.
+                amt_median_expr = amt_series.quantile(0.5)
+            else:
+                amt_median_expr = None
+
+            phys_expr = (valid_p["payee_type"] == "physician").sum()
+            hosp_expr = (valid_p["payee_type"] == "teaching_hospital").sum()
+
+            vpdf = valid_p[["payee_type", "physician_npi", "physician_profile_id", "teaching_hospital_id"]]
+            phys_missing_npi_expr = vpdf[vpdf["payee_type"] == "physician"]["physician_npi"].isna().sum()
+            phys_missing_prof_expr = vpdf[vpdf["payee_type"] == "physician"]["physician_profile_id"].isna().sum()
+            hosp_missing_id_expr = vpdf[vpdf["payee_type"] == "teaching_hospital"]["teaching_hospital_id"].isna().sum()
+
+            to_compute = [
+                rows_in_expr,
+                rows_after_sampling_expr,
+                rows_valid_expr,
+                rows_rej_expr,
+                amt_min_expr,
+                amt_mean_expr,
+                amt_max_expr,
+                phys_expr,
+                hosp_expr,
+                phys_missing_npi_expr,
+                phys_missing_prof_expr,
+                hosp_missing_id_expr,
+            ]
+            if compute_median:
+                to_compute.append(amt_median_expr)
+
+            with ProgressBar():
+                results = compute(*to_compute)
+
+            i = 0
+            rows_in_val = int(results[i]); i += 1
+            rows_after_sampling_val = int(results[i]); i += 1
+            rows_valid_val = int(results[i]); i += 1
+            rows_rej_val = int(results[i]) if not cfg.skip_rejected else 0; i += 1
+
+            if rows_valid_val:
+                amt_min_val = float(results[i]); i += 1
+                amt_mean_val = float(results[i]); i += 1
+                amt_max_val = float(results[i]); i += 1
+            else:
+                i += 3
+
+            phys_val = int(results[i]) if rows_valid_val else 0; i += 1
+            hosp_val = int(results[i]) if rows_valid_val else 0; i += 1
+
+            phys_missing_npi_val = int(results[i]) if phys_val else 0; i += 1
+            phys_missing_prof_val = int(results[i]) if phys_val else 0; i += 1
+            hosp_missing_id_val = int(results[i]) if hosp_val else 0; i += 1
+
+            if compute_median:
+                amt_median_val = float(results[i]) if rows_valid_val else None
 
         timings["t_stats"] = round(time.perf_counter() - t_stats_start, 4)
 
-        total_time = time.perf_counter() - t_phase_start
+    total_time = time.perf_counter() - t_phase_start
 
-        report = {
-            "dataset_type": cfg.dataset_type,
-            "program_year": cfg.program_year,
-            "rows_in": rows_in,
-            "rows_valid": rows_valid,
-            "rows_rejected": rows_rej,
-            "valid_rate": float(rows_valid / rows_in) if rows_in else None,
-            "amount_usd_stats": {
-                "min": amt_min,
-                "mean": amt_mean,
-                "median": amt_median,
-                "max": amt_max,
-            },
-            "payee_counts": {
-                "physicians": phys,
-                "teaching_hospitals": hosp,
-            },
-            "identifier_missingness": {
-                "physician_npi_missing_count": phys_missing_npi,
-                "physician_npi_missing_pct": (phys_missing_npi / phys * 100.0) if phys else None,
-                "physician_profile_missing_count": phys_missing_prof,
-                "physician_profile_missing_pct": (phys_missing_prof / phys * 100.0) if phys else None,
-                "hospital_id_missing_count": hosp_missing_id,
-                "hospital_id_missing_pct": (hosp_missing_id / hosp * 100.0) if hosp else None,
-            },
-            "timings_sec": {"total": round(total_time, 4), **timings},
-            "scaling": {**scale_info},
-            "reproducibility": {
-                "normalization_version": NORMALIZATION_VERSION,
-                "normalization_description": NORMALIZATION_DESCRIPTION,
-                "hash_function": HASH_FUNCTION,
-                "use_dask": cfg.use_dask,
-                "blocksize": cfg.blocksize,
-                "dask_npartitions": cfg.dask_npartitions,
-                "scheduler": cfg.scheduler,
-            },
-            "outputs": {
-                "payments_clean_dir": str(clean_dir),
-                "payments_rejected_dir": str(rej_dir) if not cfg.skip_rejected else None,
-            },
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
+    report = {
+        "dataset_type": cfg.dataset_type,
+        "program_year": cfg.program_year,
+        "rows_in": rows_in_val,
+        "rows_after_sampling": rows_after_sampling_val,
+        "rows_valid": rows_valid_val,
+        "rows_rejected": rows_rej_val if rows_rej_val is not None else (0 if cfg.skip_rejected else None),
+        "valid_rate": (float(rows_valid_val / rows_in_val) if rows_in_val and rows_valid_val is not None else None),
+        "amount_usd_stats": {
+            "min": amt_min_val,
+            "mean": amt_mean_val,
+            "median": amt_median_val,
+            "max": amt_max_val,
+        },
+        "payee_counts": {
+            "physicians": int(phys_val),
+            "teaching_hospitals": int(hosp_val),
+        },
+        "identifier_missingness": {
+            "physician_npi_missing_count": int(phys_missing_npi_val),
+            "physician_npi_missing_pct": (phys_missing_npi_val / phys_val * 100.0) if phys_val else None,
+            "physician_profile_missing_count": int(phys_missing_prof_val),
+            "physician_profile_missing_pct": (phys_missing_prof_val / phys_val * 100.0) if phys_val else None,
+            "hospital_id_missing_count": int(hosp_missing_id_val),
+            "hospital_id_missing_pct": (hosp_missing_id_val / hosp_val * 100.0) if hosp_val else None,
+        },
+        "timings_sec": {"total": round(total_time, 4), **timings},
+        "sampling": {
+            "fraction": float(cfg.sampling_fraction),
+            "seed": cfg.sampling_seed,
+            "method": cfg.sampling_method,
+            "enabled": cfg.sampling_fraction < 0.9999,
+        },
+        "stats_config": {
+            "compute_stats": bool(cfg.compute_stats),
+            "compute_median": bool(cfg.stats_compute_median),
+            "median_method": cfg.stats_median_method,
+            "pandas_threshold": int(cfg.stats_pandas_threshold),
+            "pandas_used": bool(pandas_stats_used),
+        },
+        "reproducibility": {
+            "normalization_version": NORMALIZATION_VERSION,
+            "normalization_description": NORMALIZATION_DESCRIPTION,
+            "hash_function": HASH_FUNCTION,
+            "use_dask": cfg.use_dask,
+            "blocksize": cfg.blocksize,
+            "dask_npartitions": cfg.dask_npartitions,
+            "scheduler": cfg.scheduler,
+            "max_workers": cfg.max_workers,
+        },
+        "outputs": {
+            "payments_clean_dir": str(clean_dir),
+            "payments_rejected_dir": str(rej_dir) if not cfg.skip_rejected else None,
+        },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
 
-        with open(out_dir / "cleaning_report.json", "w", encoding="utf-8") as f:
-            json.dump(report, f, indent=2)
+    with open(out_dir / "cleaning_report.json", "w", encoding="utf-8") as f:
+        json.dump(report, f, indent=2)
 
-        logging.info("Wrote clean dataset: %s", clean_dir)
-        if not cfg.skip_rejected:
-            logging.info("Wrote rejected dataset: %s", rej_dir)
-        logging.info("Wrote report: %s", out_dir / "cleaning_report.json")
-        return
-
-    raise ValueError("use_dask=false is not supported in this concurrent CPU script (intentionally).")
+    logging.info("[Phase 1] Cleaning completed in %.2fs", total_time)
+    logging.info("Wrote clean dataset: %s", clean_dir)
+    if not cfg.skip_rejected:
+        logging.info("Wrote rejected dataset: %s", rej_dir)
+    logging.info("Wrote report: %s", out_dir / "cleaning_report.json")
 
 
 def run_from_pipeline(
-        pipeline_cfg: Dict,
-        *,
-        out_dir: Path,
-        approach: str,
-        run_id: str,
-        dataset_name: str,
+    pipeline_cfg: Dict,
+    *,
+    out_dir: Path,
+    approach: str,
+    run_id: str,
+    dataset_name: str,
 ) -> Dict:
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    phase_cfg = pipeline_cfg.get("phase1_clean", {})
-    dataset_cfg = pipeline_cfg.get("dataset", {})
-    inputs_cfg = pipeline_cfg.get("inputs", {})
+    phase_cfg = pipeline_cfg.get("phase1_clean", {}) or {}
+    dataset_cfg = pipeline_cfg.get("dataset", {}) or {}
+    inputs_cfg = pipeline_cfg.get("inputs", {}) or {}
     config_dir = Path(pipeline_cfg.get("__config_dir", Path.cwd()))
     scale_cfg = dataset_cfg.get("scale", {}) or {}
 
@@ -1179,19 +1251,22 @@ def run_from_pipeline(
     program_year = int(phase_cfg.get("program_year", dataset_cfg.get("year", dataset_cfg.get("program_year", 2024))))
 
     raw_inputs = inputs_cfg.get("csv_files")
-    if raw_inputs is None or raw_inputs == []:
+    if not raw_inputs:
         raw_inputs = inputs_cfg.get("csv_glob", [])
     if isinstance(raw_inputs, str):
         raw_inputs = [raw_inputs]
     if not raw_inputs:
         raise ValueError("pipeline_cfg.inputs.csv_files is required for phase1_clean")
 
-    input_files = []
+    input_files: List[str] = []
     for f in list(raw_inputs):
         p = Path(f)
         if not p.is_absolute():
             p = config_dir / f
         input_files.append(str(p.resolve()))
+
+    sampling_cfg = (phase_cfg.get("sampling", {}) or {})
+    stats_cfg = (phase_cfg.get("stats", {}) or {})
 
     cfg = CleanConfig(
         dataset_type=dataset_type,
@@ -1202,20 +1277,27 @@ def run_from_pipeline(
         blocksize=str(phase_cfg.get("blocksize", "256MB")),
         dask_npartitions=int(phase_cfg.get("dask_npartitions", auto_parts)),
         scheduler=str(phase_cfg.get("scheduler", "threads")),
+        persist=bool(phase_cfg.get("persist", True)),
         write_format=str(phase_cfg.get("write_format", "parquet")),
         keep_source_file=bool(phase_cfg.get("keep_source_file", True)),
         skip_rejected=bool(phase_cfg.get("skip_rejected", True)),
-        # legacy scale params
+        sampling_fraction=float(sampling_cfg.get("fraction", 1.0)),
+        sampling_seed=sampling_cfg.get("seed"),
+        sampling_method=str(sampling_cfg.get("method", "sha1")),
+        sampling_stage=str(sampling_cfg.get("stage", "canonical")),
         scale_mode=str(scale_cfg.get("mode", scale_cfg.get("scale_mode", "none"))),
         scale_value=scale_cfg.get("value", scale_cfg.get("scale_value", None)),
         scale_key_cols=scale_cfg.get("key_cols", None),
-        # new sampling knob (disabled by default)
         scale_enabled=bool(scale_cfg.get("enabled", False)),
         scale_fraction=float(scale_cfg.get("fraction", 1.0)),
         scale_seed=int(scale_cfg.get("seed", 123)),
         scale_method=str(scale_cfg.get("method", "hash_record_id")),
         column_mapping=phase_cfg.get("column_mapping"),
         max_workers=max_workers,
+        stats_compute_median=bool(stats_cfg.get("compute_median", False)),
+        stats_median_method=str(stats_cfg.get("median_method", "exact")),
+        stats_pandas_threshold=int(stats_cfg.get("use_pandas_if_rows_lt", 0)),
+        compute_stats=bool(phase_cfg.get("compute_stats", True)),
     )
 
     cfg_snapshot = {
@@ -1226,18 +1308,22 @@ def run_from_pipeline(
         "write_format": cfg.write_format,
         "keep_source_file": cfg.keep_source_file,
         "skip_rejected": cfg.skip_rejected,
-        "scale_mode": cfg.scale_method,
-        "scale_value": cfg.scale_fraction,
-        "scale_seed": cfg.scale_seed,
-        # legacy scale fields for compatibility
-        "legacy_scale_mode": cfg.scale_mode,
-        "legacy_scale_value": cfg.scale_value,
-        "legacy_scale_key_cols": cfg.scale_key_cols,
+        "sampling_fraction": cfg.sampling_fraction,
+        "sampling_seed": cfg.sampling_seed,
+        "sampling_method": cfg.sampling_method,
+        "sampling_stage": cfg.sampling_stage,
         "use_dask": cfg.use_dask,
         "blocksize": cfg.blocksize,
         "dask_npartitions": cfg.dask_npartitions,
         "scheduler": cfg.scheduler,
-        "column_mapping": cfg.column_mapping,
+        "max_workers": cfg.max_workers,
+        "persist": cfg.persist,
+        "stats": {
+            "compute_stats": cfg.compute_stats,
+            "compute_median": cfg.stats_compute_median,
+            "median_method": cfg.stats_median_method,
+            "use_pandas_if_rows_lt": cfg.stats_pandas_threshold,
+        },
     }
     cfg_path = out_dir / "config_from_pipeline.yaml"
     with open(cfg_path, "w", encoding="utf-8") as f:
@@ -1261,7 +1347,6 @@ def run_from_pipeline(
             "clean_dir": str(out_dir / "payments_clean"),
             "rejected_dir": str(out_dir / "payments_rejected"),
             "report": str(out_dir / "cleaning_report.json"),
-            "fingerprint": str(out_dir / "dataset_fingerprint.json"),
         },
     }
 

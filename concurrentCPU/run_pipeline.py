@@ -50,6 +50,11 @@ PHASE_MODULES = {
 }
 
 
+def fraction_label_from_fraction(fraction: float) -> str:
+    pct = int(round(max(0.0, fraction) * 100))
+    return f"fraction_{pct:02d}pct"
+
+
 def unique_run_id() -> str:
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     suffix = secrets.token_hex(2)
@@ -238,8 +243,6 @@ def run_once(
         "phase3_algos": run_dir / "phase3_algos",
         "phase4_score": run_dir / "phase4_score",
         "reports": run_dir / "reports",
-        "logs": run_dir / "logs",
-        "figs": run_dir / "figs",
     }
     ensure_dirs(list(phase_dirs.values()))
 
@@ -269,9 +272,13 @@ def run_once(
     print(f"[{run_id}] Finished phase1_clean in {timings['phase1_clean']:.2f}s", flush=True)
     print(f"[{run_id}] Clean output -> {clean_res['artifacts'].get('clean_dir')}", flush=True)
 
-    clean_manifest = Path(clean_res["artifacts"].get("clean_manifest")) if clean_res.get("artifacts") else None
-    if clean_manifest and not clean_manifest.exists():
-        clean_manifest = None
+    clean_manifest_val = None
+    if clean_res.get("artifacts"):
+        cm = clean_res["artifacts"].get("clean_manifest")
+        if cm:
+            clean_manifest_val = Path(cm)
+            if not clean_manifest_val.exists():
+                clean_manifest_val = None
 
     # Phase 2: graph build
     print(f"[{run_id}] Starting phase2_graph", flush=True)
@@ -279,7 +286,7 @@ def run_once(
     graph_res = PHASE_MODULES["graph"].run_from_pipeline(
         pipeline_cfg,
         clean_dir=Path(clean_res["artifacts"]["clean_dir"]),
-        clean_manifest=clean_manifest,
+        clean_manifest=clean_manifest_val,
         out_dir=phase_dirs["phase2_graph"],
         approach=approach,
         run_id=run_id,
@@ -377,11 +384,20 @@ def main() -> None:
     out_root = Path(root_dir)
     if not out_root.is_absolute():
         out_root = REPO_ROOT / out_root
-    out_root = out_root / args.approach / dataset_name
+
+    # sampling fraction drives fraction folder (align with sequential)
+    sampling_fraction = float(pipeline_cfg.get("phase1_clean", {}).get("sampling", {}).get("fraction", 1.0))
+    fraction_dir = fraction_label_from_fraction(sampling_fraction)
+
+    # worker label folder
+    worker_label = pipeline_cfg["execution"].get("max_workers", 0)
+    worker_dir = f"workers_{worker_label if worker_label > 0 else 'auto'}"
+
+    out_root = out_root / args.approach / dataset_name / fraction_dir / worker_dir
     out_root.mkdir(parents=True, exist_ok=True)
 
     runs_cfg = pipeline_cfg.get("runs", {})
-    runs = int(runs_cfg.get("n_runs", args.runs) or args.runs)
+    runs = int(runs_cfg.get("runs", args.runs) or args.runs)
 
     # NOTE: max_workers for concurrent runs is no longer used; kept for compatibility
     max_workers = pipeline_cfg["execution"].get("max_workers", 0)

@@ -11,16 +11,27 @@ output:
   root_dir: output
 
 runs:
-  n_runs: 1
+  n_runs: 5
 
 execution:
   max_workers: 8
 
 phase1_clean:
-  chunk_size: 500000
+  # memory-safety knobs for large runs
+  blocksize: 128MB         # smaller csv read chunks -> smaller partitions
+  dask_npartitions: 64     # explicit upper bound on partitions
+  persist: false           # skip in-memory cache to avoid ArrayMemoryError
+  chunk_size: 250000       # lower chunk in canonicalization to cut per-partition size
   write_format: parquet
   keep_source_file: true
   skip_rejected: true
+  sampling:
+    fraction: 0.1   # options for experiments: 0.01 (1%), 0.05 (5%), 0.10 (10%), 0.25 (25%), 1.0 (full dataset)
+    seed: 42
+  stats:
+    compute_median: false       # keep off for speed
+    use_pandas_if_rows_lt: 0        # disable pandas fast-path (keeps work lazy)
+
 
 phase2_graph:
   payer_id_col: payer_id
@@ -38,7 +49,7 @@ phase3_algos:
 
 phase4_score:
   top_k: 200
-  score_node_types: [physician, teaching_hospital]
+  score_node_types: [ physician, teaching_hospital ]
   method: robust_z_logsum
   eps: 1.0e-9
   w_in_w: 0.55
