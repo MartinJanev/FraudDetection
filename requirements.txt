@@ -9,3 +9,5 @@ matplotlib
 
 dask[dataframe,distributed]
 networkit
+
+numba

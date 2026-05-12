@@ -42,6 +42,8 @@ def setup_logging(level: str = "INFO") -> None:
 class ScoreConfig:
     graph_dir: str
     degree_path: str
+    pagerank_path: str = ""
+    components_path: str = ""
 
     output_dir: Optional[str] = None
     top_k: int = 200
@@ -52,6 +54,12 @@ class ScoreConfig:
     w_in_deg: float = 0.25
     w_out_w: float = 0.10
     w_out_deg: float = 0.10
+
+    use_pagerank: bool = False
+    w_pagerank: float = 0.0
+    use_components: bool = False
+    w_component: float = 0.0
+
     min_in_w: float = 0.0
     min_in_deg: int = 0
 
@@ -73,6 +81,8 @@ def load_config(path: str) -> ScoreConfig:
     graph_dir = resolve_path(raw["graph_dir"])
     output_dir = resolve_path(raw.get("output_dir")) if raw.get("output_dir") else None
     degree_path = resolve_path(raw.get("degree_path", "")) if raw.get("degree_path") else ""
+    pagerank_path = resolve_path(raw.get("pagerank_path", "")) if raw.get("pagerank_path") else ""
+    components_path = resolve_path(raw.get("components_path", "")) if raw.get("components_path") else ""
 
     score_node_types = raw.get("score_node_types", ["physician", "teaching_hospital"])
 
@@ -81,6 +91,8 @@ def load_config(path: str) -> ScoreConfig:
     return ScoreConfig(
         graph_dir=graph_dir,
         degree_path=degree_path,
+        pagerank_path=pagerank_path,
+        components_path=components_path,
         output_dir=resolved_output,
         top_k=int(raw.get("top_k", 200)),
         score_node_types=list(score_node_types),
@@ -90,6 +102,10 @@ def load_config(path: str) -> ScoreConfig:
         w_in_deg=float(raw.get("w_in_deg", 0.25)),
         w_out_w=float(raw.get("w_out_w", 0.10)),
         w_out_deg=float(raw.get("w_out_deg", 0.10)),
+        use_pagerank=bool(raw.get("use_pagerank", False)),
+        w_pagerank=float(raw.get("w_pagerank", 0.0)),
+        use_components=bool(raw.get("use_components", False)),
+        w_component=float(raw.get("w_component", 0.0)),
         min_in_w=float(raw.get("min_in_w", 0.0)),
         min_in_deg=int(raw.get("min_in_deg", 0)),
     )
@@ -125,6 +141,33 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
     for old_col, new_col in column_mapping.items():
         if old_col in df.columns and new_col not in df.columns:
             df = df.rename(columns={old_col: new_col})
+            
+    # Attach PageRank if enabled
+    if cfg.use_pagerank and cfg.w_pagerank != 0.0:
+        pr_path = cfg.pagerank_path or str(Path(cfg.graph_dir) / "pagerank.parquet")
+        if Path(pr_path).exists():
+            pr = pd.read_parquet(pr_path)
+            if "node_id" in pr.columns and "pagerank" in pr.columns:
+                df = df.merge(pr[["node_id", "pagerank"]], on="node_id", how="left")
+            if "pagerank" in df.columns:
+                df["pagerank"] = pd.to_numeric(df["pagerank"], errors="coerce").fillna(0.0)
+            else:
+                df["pagerank"] = 0.0
+
+    # Attach Components if enabled
+    if cfg.use_components and cfg.w_component != 0.0:
+        c_path = cfg.components_path or str(Path(cfg.graph_dir) / "components.parquet")
+        if Path(c_path).exists():
+            comp = pd.read_parquet(c_path)
+            if "component_id" in comp.columns:
+                comp_sizes = comp.groupby("component_id").size().reset_index(name="comp_size")
+                comp = comp.merge(comp_sizes, on="component_id", how="left")
+            if "node_id" in comp.columns and "comp_size" in comp.columns:
+                df = df.merge(comp[["node_id", "comp_size"]], on="node_id", how="left")
+            if "comp_size" in df.columns:
+                df["comp_size"] = pd.to_numeric(df["comp_size"], errors="coerce").fillna(1.0) # size 1 if not found
+            else:
+                df["comp_size"] = 1.0
 
     required = ["node_id", "node_type", "in_w", "in_deg", "out_w", "out_deg"]
     missing = [c for c in required if c not in df.columns]
@@ -158,6 +201,22 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
             + cfg.w_out_w * z_out_w
             + cfg.w_out_deg * z_out_deg
         )
+        
+        if cfg.use_pagerank and cfg.w_pagerank != 0.0 and "pagerank" in df.columns:
+            pr = df["pagerank"].to_numpy()
+            f_pr = np.log1p(pr)
+            z_pr = robust_z(f_pr, eps=cfg.eps)
+            risk = risk + cfg.w_pagerank * z_pr
+            df["z_pagerank"] = z_pr
+            
+        if cfg.use_components and cfg.w_component != 0.0 and "comp_size" in df.columns:
+            # smaller component -> higher risk, maybe negative correlation
+            # We use 1/comp_size to invert it, so smaller components get higher values
+            c_size = df["comp_size"].to_numpy()
+            f_comp = np.log1p(1.0 / np.maximum(c_size, 1.0))
+            z_comp = robust_z(f_comp, eps=cfg.eps)
+            risk = risk + cfg.w_component * z_comp
+            df["z_comp_size"] = z_comp
 
         risk_shifted = risk - np.min(risk) if len(risk) else risk
 
@@ -239,11 +298,17 @@ def run(cfg: ScoreConfig) -> None:
                 "w_in_deg": cfg.w_in_deg,
                 "w_out_w": cfg.w_out_w,
                 "w_out_deg": cfg.w_out_deg,
+                "w_pagerank": cfg.w_pagerank,
+                "w_component": cfg.w_component,
             },
             "filters": {
                 "min_in_w": cfg.min_in_w,
                 "min_in_deg": cfg.min_in_deg,
             },
+            "features_used": {
+                "pagerank": cfg.use_pagerank,
+                "components": cfg.use_components,
+            }
         },
         "stats": stats,
         "timings_sec": {
@@ -282,6 +347,8 @@ def run_from_pipeline(
     cfg = ScoreConfig(
         graph_dir=str(graph_algos_dir),
         degree_path=str(Path(graph_algos_dir) / "degree.parquet"),
+        pagerank_path=str(Path(graph_algos_dir) / "pagerank.parquet"),
+        components_path=str(Path(graph_algos_dir) / "components.parquet"),
         output_dir=str(out_dir),
         top_k=int(phase_cfg.get("top_k", 200)),
         score_node_types=list(phase_cfg.get("score_node_types", ["physician", "teaching_hospital"])),
@@ -291,6 +358,10 @@ def run_from_pipeline(
         w_in_deg=float(phase_cfg.get("w_in_deg", 0.25)),
         w_out_w=float(phase_cfg.get("w_out_w", 0.10)),
         w_out_deg=float(phase_cfg.get("w_out_deg", 0.10)),
+        use_pagerank=bool(phase_cfg.get("use_pagerank", False)),
+        w_pagerank=float(phase_cfg.get("w_pagerank", 0.0)),
+        use_components=bool(phase_cfg.get("use_components", False)),
+        w_component=float(phase_cfg.get("w_component", 0.0)),
         min_in_w=float(phase_cfg.get("min_in_w", 0.0)),
         min_in_deg=int(phase_cfg.get("min_in_deg", 0)),
     )

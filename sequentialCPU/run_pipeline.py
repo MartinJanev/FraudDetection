@@ -30,6 +30,34 @@ PHASE_FILES = {
     "score": "04_fraud_scoring.py",
 }
 
+import shutil
+import glob
+from pathlib import Path
+
+
+def cleanup_intermediate_data(run_out_dir: Path):
+    """Deletes large intermediate .parquet files but keeps timing and JSON reports."""
+    print(f"🧹 Cleaning up large intermediate data in: {run_out_dir}")
+
+    # Folders to completely delete (they only contain parquet data)
+    heavy_dirs = [
+        run_out_dir / "phase1_clean" / "payments_clean",
+        run_out_dir / "phase2_graph" / "_tmp_edge_parts"
+    ]
+
+    for d in heavy_dirs:
+        if d.exists() and d.is_dir():
+            shutil.rmtree(d)
+
+    # Remove any isolated .parquet files in the phase directories
+    for phase in ["phase1_clean", "phase2_graph", "phase3_algos", "phase4_score"]:
+        phase_dir = run_out_dir / phase
+        if phase_dir.exists():
+            for parquet_file in phase_dir.glob("*.parquet"):
+                parquet_file.unlink()
+
+    print("✅ Cleanup complete. Kept timing metrics and JSON reports.")
+
 
 def load_phase_module(filename: str, module_name: str):
     path = Path(__file__).parent / filename
@@ -298,7 +326,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Run sequential CPU pipeline end-to-end")
     parser.add_argument("--config", required=True, help="Path to unified pipeline YAML config")
     parser.add_argument("--approach", default="seq_cpu", help="Approach name for output folder")
-    parser.add_argument("--runs", type=int, default=1, help="Number of runs to execute")
+    parser.add_argument("--runs", type=int, default=None, help="Number of runs to execute (overrides config)")
     parser.add_argument("--phases", default="phase1_clean,phase2_graph,phase3_algos,phase4_score", help="Comma-separated phases to run")
     parser.add_argument("--reuse-run-dir", default=None, help="Existing run directory to reuse (skip generating new run_id)")
     parser.add_argument("--log-level", default="INFO", help="Unused placeholder for future logging")
@@ -323,7 +351,8 @@ def main() -> None:
     out_root = out_root / args.approach / dataset_name / fraction_dir
     out_root.mkdir(parents=True, exist_ok=True)
 
-    runs = int(pipeline_cfg.get("runs", {}).get("n_runs", args.runs) or args.runs)
+    config_runs = int(pipeline_cfg.get("runs", {}).get("n_runs", 1))
+    runs = args.runs if args.runs is not None else config_runs
 
     aggregate_dir = out_root / "aggregate"
     timing_csv = aggregate_dir / "timing_runs.csv"
@@ -368,6 +397,8 @@ def main() -> None:
     print(f"Aggregate timings: {timing_csv}")
     print(f"Summary: {timing_summary}")
 
+    for r in run_records:
+            cleanup_intermediate_data(reuse_dir if reuse_dir else out_root / r["run_id"])
 
 if __name__ == "__main__":
     main()

@@ -11,15 +11,29 @@ output:
   root_dir: output
 
 runs:
-  n_runs: 1
+  n_runs: 5
+
+execution:
+  max_workers: 16
 
 phase1_clean:
+  use_numba: true
   chunk_size: 500000
   write_format: parquet
   keep_source_file: true
   skip_rejected: true
+  sampling:
+    fraction: 0.6  # options: 0.01 (1%), 0.05 (5%), 0.10 (10%), 0.25 (25%), 1.0 (full)
+    seed: 42
+    method: fast_hash   # "sha1" for sequential-equivalent, "fast_hash" for Numba-accelerated
+    stage: canonical
+  stats:
+    compute_median: false
+    use_pandas_if_rows_lt: 0
+
 
 phase2_graph:
+  use_numba: true
   payer_id_col: payer_id
   payer_name_norm_col: payer_name_norm
   payee_key_col: payee_key
@@ -28,20 +42,25 @@ phase2_graph:
   min_edge_weight: 0.0
 
 phase3_algos:
+  use_numba: true
   pagerank_alpha: 0.85
   pagerank_tol: 1.0e-6
   pagerank_max_iter: 100
   compute_components: true
 
 phase4_score:
+  use_numba: true
   top_k: 200
-  score_node_types: [physician, teaching_hospital]
+  score_node_types: [ physician, teaching_hospital ]
   method: robust_z_logsum
   eps: 1.0e-9
-  w_in_w: 0.55
-  w_in_deg: 0.25
-  w_out_w: 0.10
+  w_in_w: 0.40
+  w_in_deg: 0.15
+  w_out_w: 0.05
   w_out_deg: 0.10
+  use_pagerank: true
+  w_pagerank: 0.20
+  use_components: true
+  w_component: 0.10
   min_in_w: 0.0
   min_in_deg: 0
-

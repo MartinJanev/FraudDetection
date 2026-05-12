@@ -11,7 +11,7 @@ output:
   root_dir: output
 
 runs:
-  n_runs: 3
+  n_runs: 5
 
 phase1_clean:
   chunk_size: 500000
@@ -41,9 +41,13 @@ phase4_score:
   score_node_types: [physician, teaching_hospital]
   method: robust_z_logsum
   eps: 1.0e-9
-  w_in_w: 0.55
-  w_in_deg: 0.25
-  w_out_w: 0.10
+  w_in_w: 0.40
+  w_in_deg: 0.15
+  w_out_w: 0.05
   w_out_deg: 0.10
+  use_pagerank: true
+  w_pagerank: 0.20
+  use_components: true
+  w_component: 0.10
   min_in_w: 0.0
   min_in_deg: 0

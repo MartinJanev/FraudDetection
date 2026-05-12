@@ -1,50 +1,74 @@
 #!/usr/bin/env python3
-"""
-Phase 1 (Sequential): Extract + Clean CMS Open Payments into canonical schema.
+"""sequentialCPU/01_clean_data.py
 
-Outputs:
-- payments_clean.parquet (valid rows)
-- payments_rejected.parquet (invalid rows + drop_reason)
-- cleaning_report.json (summary stats)
+Phase 1 (Sequential CPU): Extract + Clean CMS Open Payments into canonical schema.
 
+Design: single thread, single process, zero Numba.  Everything that the
+concurrentNumba pipeline parallelises across a ThreadPoolExecutor is done here
+in a plain Python ``for`` loop over chunks.  The transformation logic
+(normalisation, payee-key derivation, SHA-1 record IDs) is bit-for-bit
+identical so outputs can be compared directly.
+
+Module layout
+-------------
+normalizers.py   Stateless scalar helpers: normalize_name, normalize_zip5,
+                 safe_float, parse_date, stable_hash_hex.
+                 Also owns NORMALIZATION_VERSION / HASH_FUNCTION constants.
+
+config.py        CleanConfig dataclass + YAML loaders (pipeline-style and
+                 legacy flat).  max_workers is always forced to 1.
+
+fingerprint.py   compute_file_fingerprint + create_dataset_fingerprint for
+                 reproducibility tracking.
+
+schema.py        CANONICAL_COLS, CMS_COLUMN_MAPPINGS, make_canonical_meta,
+                 get_column_mapping, sanitize_for_parquet.
+
+transforms.py    build_payee_fields_vectorized (fully vectorised, no row
+                 loops), canonicalize_chunk.
+
+01_clean_data.py (this file) Orchestrator: sequential chunk loop with tqdm
+                 progress, parquet writing, manifest, cleaning report, CLI.
 """
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import logging
-import re
+import sys
 import time
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import pandas as pd
 import yaml
-from tqdm import tqdm
 
-# ---------------------------
-# Reproducibility Constants
-# ---------------------------
+# sys.path injection so importlib-based loading (run_pipeline.py) works too
+_HERE = Path(__file__).parent
+if str(_HERE) not in sys.path:
+    sys.path.insert(0, str(_HERE))
 
-# Normalization version for deterministic name/string processing
-NORMALIZATION_VERSION = "v1"
-NORMALIZATION_DESCRIPTION = "punctuation-strip + uppercase + whitespace collapse"
+try:
+    from tqdm import tqdm as _tqdm
+    _HAS_TQDM = True
+except ImportError:
+    _HAS_TQDM = False
 
-# Hash function used for stable record IDs and payee keys
-HASH_FUNCTION = "sha1"
+from config import CleanConfig, load_config                      # type: ignore[import]
+from fingerprint import create_dataset_fingerprint               # type: ignore[import]
+from normalizers import (                                        # type: ignore[import]
+    NORMALIZATION_VERSION, NORMALIZATION_DESCRIPTION, HASH_FUNCTION,
+)
+from schema import CANONICAL_COLS, make_canonical_meta           # type: ignore[import]
+from transforms import canonicalize_chunk                        # type: ignore[import]
 
-# Number of MB to hash for input file fingerprinting (fast, not full file)
-FINGERPRINT_MB = 10
 
-
-# ---------------------------
+# ---------------------------------------------------------------------------
 # Logging
-# ---------------------------
+# ---------------------------------------------------------------------------
 
 def setup_logging(level: str = "INFO") -> None:
     logging.basicConfig(
@@ -53,1024 +77,325 @@ def setup_logging(level: str = "INFO") -> None:
     )
 
 
-# ---------------------------
-# Config
-# ---------------------------
-
-@dataclass(frozen=True)
-class CleanConfig:
-    dataset_type: str  # "general_payment" | "research_payment" | "ownership"
-    program_year: int
-    input_files: List[str]
-    output_dir: str
-    chunk_size: int = 500_000  # adjust based on RAM
-    write_format: str = "parquet"  # "parquet" or "csv"
-    keep_source_file: bool = True
-    column_mapping: Optional[Dict[str, str]] = None
-    max_workers: int = 1
-    skip_rejected: bool = False
-    # Fractional sampling of canonicalized rows (1.0 = keep all)
-    sampling_fraction: float = 1.0
-    sampling_seed: Optional[int] = None
-
-
-def load_config(path: str) -> CleanConfig:
-    with open(path, "r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f)
-
-    return CleanConfig(
-        dataset_type=str(raw["dataset_type"]),
-        program_year=int(raw["program_year"]),
-        input_files=list(raw["input_files"]),
-        output_dir=str(raw["output_dir"]),
-        chunk_size=int(raw.get("chunk_size", 500_000)),
-        write_format=str(raw.get("write_format", "parquet")),
-        keep_source_file=bool(raw.get("keep_source_file", True)),
-        column_mapping=raw.get("column_mapping"),
-        max_workers=int(raw.get("max_workers", 1)),
-        skip_rejected=bool(raw.get("skip_rejected", False)),
-        sampling_fraction=float(raw.get("sampling", {}).get("fraction", 1.0)),
-        sampling_seed=raw.get("sampling", {}).get("seed"),
-    )
-
-
-# ---------------------------
-# Dataset Fingerprinting (for reproducibility)
-# ---------------------------
-
-def compute_file_fingerprint(filepath: str, hash_mb: int = FINGERPRINT_MB) -> Dict:
-    """
-    Compute a lightweight fingerprint for an input file:
-    - File size (bytes)
-    - Last modified timestamp
-    - Fast hash of first N MB (not full file for performance)
-
-    Args:
-        filepath: Path to input file
-        hash_mb: Number of megabytes to hash from start of file
-
-    Returns:
-        Dictionary with file fingerprint metadata
-    """
-    path = Path(filepath)
-
-    if not path.exists():
-        return {
-            "file": str(path.name),
-            "exists": False,
-            "error": "File not found"
-        }
-
-    stat = path.stat()
-    file_size = stat.st_size
-    modified_time = datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat()
-
-    # Hash first N MB for fast fingerprint (not full file)
-    hash_obj = hashlib.sha1()
-    bytes_to_hash = hash_mb * 1024 * 1024
-    bytes_hashed = 0
-
-    try:
-        with open(filepath, 'rb') as f:
-            while bytes_hashed < bytes_to_hash:
-                chunk = f.read(min(8192, bytes_to_hash - bytes_hashed))
-                if not chunk:
-                    break
-                hash_obj.update(chunk)
-                bytes_hashed += len(chunk)
-
-        partial_hash = hash_obj.hexdigest()
-    except Exception as e:
-        partial_hash = f"error: {e}"
-
-    return {
-        "file": str(path.name),
-        "absolute_path": str(path.absolute()),
-        "size_bytes": file_size,
-        "size_mb": round(file_size / (1024 * 1024), 2),
-        "modified_utc": modified_time,
-        "partial_hash": partial_hash,
-        "hash_method": f"{HASH_FUNCTION}(first_{hash_mb}MB)",
-    }
-
-
-def create_dataset_fingerprint(config: CleanConfig, config_path: str) -> Dict:
-    """
-    Create a complete fingerprint for the dataset processing run.
-    Includes: input files, config snapshot, normalization version, hash function.
-
-    Args:
-        config: CleanConfig object
-        config_path: Path to config YAML file
-
-    Returns:
-        Dictionary with complete dataset fingerprint
-    """
-    input_fingerprints = []
-    for fpath in config.input_files:
-        fingerprint = compute_file_fingerprint(fpath)
-        input_fingerprints.append(fingerprint)
-
-    # Load raw config for snapshot
-    with open(config_path, 'r', encoding='utf-8') as f:
-        config_snapshot = yaml.safe_load(f)
-
-    fingerprint = {
-        "fingerprint_version": "1.0",
-        "generated_at": datetime.now(timezone.utc).isoformat(),
-        "reproducibility": {
-            "normalization_version": NORMALIZATION_VERSION,
-            "normalization_description": NORMALIZATION_DESCRIPTION,
-            "hash_function": HASH_FUNCTION,
-        },
-        "config_snapshot": config_snapshot,
-        "input_files": input_fingerprints,
-        "processing_params": {
-            "dataset_type": config.dataset_type,
-            "program_year": config.program_year,
-            "chunk_size": config.chunk_size,
-            "write_format": config.write_format,
-            "keep_source_file": config.keep_source_file,
-        }
-    }
-
-    return fingerprint
-
-
-# ---------------------------
-# Normalization helpers
-# ---------------------------
-
-_PUNCT_RE = re.compile(r"[.,;:()\[\]{}'\"`]+")
-
-
-def normalize_name(s: Optional[str]) -> Optional[str]:
-    if s is None:
-        return None
-    s = str(s)
-    s = s.strip()
-    if not s:
-        return None
-    s = _PUNCT_RE.sub("", s)
-    s = re.sub(r"\s+", " ", s)
-    return s.upper()
-
-
-def normalize_zip5(z: Optional[str]) -> Optional[str]:
-    if z is None:
-        return None
-    z = re.sub(r"\D+", "", str(z))
-    if len(z) < 5:
-        return None
-    return z[:5]
-
-
-def safe_float(x) -> Optional[float]:
-    if x is None:
-        return None
-    try:
-        # Some files use commas, currency symbols, etc.
-        s = str(x).strip()
-        if s == "" or s.lower() in {"nan", "none"}:
-            return None
-        s = s.replace(",", "")
-        s = re.sub(r"[^0-9.\-]", "", s)
-        if s == "" or s == "-" or s == ".":
-            return None
-        val = float(s)
-        return val
-    except Exception:
-        return None
-
-
-def parse_date(x) -> Optional[str]:
-    """
-    Return ISO date string YYYY-MM-DD or None.
-    """
-    if x is None:
-        return None
-    s = str(x).strip()
-    if not s:
-        return None
-    fmts = ["%Y-%m-%d", "%m/%d/%Y", "%Y/%m/%d"]
-    for fmt in fmts:
-        try:
-            dt = datetime.strptime(s, fmt).date()
-            return dt.isoformat()
-        except ValueError:
-            continue
-    return None
-
-
-def stable_hash_hex(parts: Iterable[Optional[str]]) -> str:
-    joined = "|".join("" if p is None else str(p) for p in parts)
-    return hashlib.sha1(joined.encode("utf-8")).hexdigest()
-
-
-def sampling_mask_from_record_ids(record_ids: pd.Series, fraction: float, seed: Optional[int]) -> pd.Series:
-    """
-    Deterministic sampling mask based on record_id hash so results are stable across chunk sizes/runs.
-    """
-    if fraction >= 0.9999:
-        return pd.Series([True] * len(record_ids), index=record_ids.index)
-    salt = "" if seed is None else str(seed)
-    # Use SHA1 of record_id + salt and map to [0,1)
-    hashes = record_ids.astype(str).map(lambda rid: hashlib.sha1((rid + salt).encode("utf-8")).hexdigest())
-    values = hashes.map(lambda h: int(h[:15], 16) / float(16 ** 15))
-    return values < fraction
-
-
-# ---------------------------
-# Column mapping
-# ---------------------------
-# Official CMS Open Payments column names as documented in CMS data dictionary
-
-CANONICAL_COLS = [
-    # identity/provenance
-    "record_id", "program_year", "dataset_type", "source_file",
-
-    # payer
-    "payer_name_raw", "payer_name_norm", "payer_id", "payer_state", "payer_country",
-
-    # payee (common)
-    "payee_type", "payee_key",
-
-    # physician (nullable)
-    "physician_npi", "physician_profile_id",
-    "physician_name_raw", "physician_name_norm",
-    "physician_specialty", "physician_primary_type",
-    "physician_state", "physician_zip5",
-
-    # hospital (nullable)
-    "teaching_hospital_id", "teaching_hospital_name_raw", "teaching_hospital_name_norm",
-    "teaching_hospital_state", "teaching_hospital_zip5",
-
-    # payment facts
-    "amount_usd", "payment_date", "payment_quarter",
-    "nature_of_payment", "form_of_payment", "payment_context",
-    "product_name", "associated_covered_drug_or_device_flag", "is_product_related",
-
-    # integrity
-    "is_valid", "drop_reason",
-]
-
-# CMS Open Payments official column mappings by dataset type
-# Source: CMS Open Payments Data Dictionary
-CMS_COLUMN_MAPPINGS = {
-    "general_payment": {
-        "amount": "Total_Amount_of_Payment_USDollars",
-        "date": "Date_of_Payment",
-        "payer_name": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Name",
-        "payer_id": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID",
-        "payer_state": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_State",
-        "payer_country": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Country",
-        "phys_npi": "Covered_Recipient_NPI",
-        "phys_profile_id": "Covered_Recipient_Profile_ID",
-        "phys_last": "Covered_Recipient_Last_Name",
-        "phys_first": "Covered_Recipient_First_Name",
-        "phys_middle": "Covered_Recipient_Middle_Name",
-        "phys_specialty": "Covered_Recipient_Specialty_1",
-        "phys_primary_type": "Covered_Recipient_Primary_Type_1",
-        "phys_state": "Recipient_State",
-        "phys_zip": "Recipient_Zip_Code",
-        "hospital_id": "Teaching_Hospital_ID",
-        "hospital_name": "Teaching_Hospital_Name",
-        "hospital_ccn": "Teaching_Hospital_CCN",
-        "nature": "Nature_of_Payment_or_Transfer_of_Value",
-        "form": "Form_of_Payment_or_Transfer_of_Value",
-        "context": "Contextual_Information",
-        "product": "Name_of_Drug_or_Biological_or_Device_or_Medical_Supply_1",
-        "drug_device_flag": "Indicate_Drug_or_Biological_or_Device_or_Medical_Supply_1",
-        "recipient_type": "Covered_Recipient_Type",
-    },
-    "research_payment": {
-        "amount": "Total_Amount_of_Payment_USDollars",
-        "date": "Date_of_Payment",
-        "payer_name": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Name",
-        "payer_id": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID",
-        "payer_state": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_State",
-        "payer_country": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Country",
-        "phys_npi": "Covered_Recipient_NPI",
-        "phys_profile_id": "Covered_Recipient_Profile_ID",
-        "phys_last": "Covered_Recipient_Last_Name",
-        "phys_first": "Covered_Recipient_First_Name",
-        "phys_middle": "Covered_Recipient_Middle_Name",
-        "phys_specialty": "Covered_Recipient_Specialty_1",
-        "phys_primary_type": "Covered_Recipient_Primary_Type_1",
-        "phys_state": "Recipient_State",
-        "phys_zip": "Recipient_Zip_Code",
-        "hospital_id": "Teaching_Hospital_ID",
-        "hospital_name": "Teaching_Hospital_Name",
-        "hospital_ccn": "Teaching_Hospital_CCN",
-        "nature": "Nature_of_Payment_or_Transfer_of_Value",
-        "form": "Form_of_Payment_or_Transfer_of_Value",
-        "context": "Contextual_Information",
-        "product": "Name_of_Drug_or_Biological_or_Device_or_Medical_Supply_1",
-        "drug_device_flag": "Indicate_Drug_or_Biological_or_Device_or_Medical_Supply_1",
-        "recipient_type": "Covered_Recipient_Type",
-    },
-    "ownership": {
-        # Core fields
-        "amount": "Total_Amount_Invested_USDollars",
-        "payer_name": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Name",
-        "payer_id": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_ID",
-        "payer_state": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_State",
-        "payer_country": "Applicable_Manufacturer_or_Applicable_GPO_Making_Payment_Country",
-        # Ownership uses "Physician_*" prefix, not "Covered_Recipient_*"
-        "phys_npi": "Physician_NPI",
-        "phys_profile_id": "Physician_Profile_ID",
-        "phys_last": "Physician_Last_Name",
-        "phys_first": "Physician_First_Name",
-        "phys_middle": "Physician_Middle_Name",
-        "phys_specialty": "Physician_Specialty",
-        "phys_primary_type": "Physician_Primary_Type",
-        "phys_state": "Recipient_State",
-        "phys_zip": "Recipient_Zip_Code",
-        # Note: Ownership data does NOT have:
-        # - date (no Date_Ownership_Interest_Acquired in actual CSV)
-        # - nature, form, context, product, drug_device_flag (not applicable to ownership)
-        # - hospital_id, hospital_name, hospital_ccn (not in ownership data)
-        # - recipient_type (not in ownership data)
-    },
-}
-
-
-def get_column_mapping(df: pd.DataFrame, dataset_type: str, custom_mapping: Optional[Dict[str, str]] = None) -> Dict[
-    str, Optional[str]]:
-    """
-    Get the column mapping for the dataset using official CMS column names.
-
-    Args:
-        df: DataFrame with actual column names
-        dataset_type: Type of dataset (general_payment, research_payment, ownership)
-        custom_mapping: Optional custom column mapping from config file
-
-    Returns:
-        Dict mapping internal keys to actual column names in the DataFrame
-
-    Raises:
-        ValueError: If dataset_type is not recognized or required columns are missing
-    """
-    if custom_mapping:
-        # Use custom mapping from config if provided
-        base_mapping = custom_mapping
-    elif dataset_type in CMS_COLUMN_MAPPINGS:
-        # Use official CMS mapping
-        base_mapping = CMS_COLUMN_MAPPINGS[dataset_type]
-    else:
-        raise ValueError(f"Unknown dataset_type: {dataset_type}. Must be one of: {list(CMS_COLUMN_MAPPINGS.keys())}")
-
-    # Verify that mapped columns exist in the actual DataFrame
-    actual_cols = set(df.columns)
-    result = {}
-    missing_cols = []
-
-    for key, col_name in base_mapping.items():
-        if col_name in actual_cols:
-            result[key] = col_name
-        else:
-            result[key] = None
-            # Only track as missing if it's a critical column
-            if key in ["amount", "payer_name"]:
-                missing_cols.append(col_name)
-
-    if missing_cols:
-        raise ValueError(
-            f"Required columns missing from CSV file: {missing_cols}\n"
-            f"Available columns: {sorted(actual_cols)}"
-        )
-
-    return result
-
-
-# ---------------------------
-# Canonicalization
-# ---------------------------
-
-def build_payee_fields_vectorized(df: pd.DataFrame, colmap: Dict[str, Optional[str]]) -> Dict[str, pd.Series]:
-    """
-    Vectorized payee field construction. Much faster than row-wise iteration.
-
-    Determines payee type based on:
-    1. Teaching_Hospital_ID or Teaching_Hospital_Name presence
-    2. Covered_Recipient_Type field (if available)
-    3. Defaults to physician
-
-    Returns dict of Series for all payee-related columns.
-    """
-    n = len(df)
-
-    # Get columns (with safe defaults)
-    hosp_id_col = colmap.get("hospital_id")
-    hosp_name_col = colmap.get("hospital_name")
-    recipient_type_col = colmap.get("recipient_type")
-
-    # Determine if each row is a hospital
-    # Priority: explicit hospital ID/name, then recipient_type field
-    is_hospital = pd.Series([False] * n, index=df.index)
-
-    # FIX 1: Exclude NaN strings and check nullness before casting
-    # After astype(str), NaN becomes "nan" which is not empty, causing misclassification
-    if hosp_id_col and hosp_id_col in df.columns:
-        hosp_id_orig = df[hosp_id_col]
-        hosp_id_mask = (
-                hosp_id_orig.notna() &
-                hosp_id_orig.astype(str).str.strip().ne("") &
-                hosp_id_orig.astype(str).str.lower().ne("nan")
-        )
-        is_hospital |= hosp_id_mask
-
-    if hosp_name_col and hosp_name_col in df.columns:
-        hosp_name_orig = df[hosp_name_col]
-        hosp_name_mask = (
-                hosp_name_orig.notna() &
-                hosp_name_orig.astype(str).str.strip().ne("") &
-                hosp_name_orig.astype(str).str.lower().ne("nan")
-        )
-        is_hospital |= hosp_name_mask
-
-    # Also check recipient_type for "Teaching Hospital" variants
-    if recipient_type_col and recipient_type_col in df.columns:
-        recip_type = df[recipient_type_col].astype(str).str.upper()
-        is_hospital |= recip_type.str.contains("HOSPITAL", na=False)
-
-    # Build hospital fields (vectorized)
-    hosp_id_series = df[hosp_id_col].astype(
-        str).str.strip() if hosp_id_col and hosp_id_col in df.columns else pd.Series([None] * n, index=df.index)
-    hosp_id_series = hosp_id_series.replace("", None).replace("nan", None)
-
-    hosp_name_raw = df[hosp_name_col].astype(
-        str).str.strip() if hosp_name_col and hosp_name_col in df.columns else pd.Series([None] * n, index=df.index)
-    hosp_name_raw = hosp_name_raw.replace("", None).replace("nan", None)
-    hosp_name_norm = hosp_name_raw.map(lambda x: normalize_name(x) if x else None)
-
-    # Hospital location uses recipient location fields
-    state_col = colmap.get("phys_state")
-    zip_col = colmap.get("phys_zip")
-    hosp_state = df[state_col] if state_col and state_col in df.columns else pd.Series([None] * n, index=df.index)
-    hosp_zip5 = df[zip_col].map(normalize_zip5) if zip_col and zip_col in df.columns else pd.Series([None] * n,
-                                                                                                    index=df.index)
-
-    # Build physician fields (vectorized)
-    npi_col = colmap.get("phys_npi")
-    profile_col = colmap.get("phys_profile_id")
-
-    # Clean NPI: strip non-digits
-    npi_series = df[npi_col] if npi_col and npi_col in df.columns else pd.Series([None] * n, index=df.index)
-    npi_clean = npi_series.astype(str).str.replace(r"\D+", "", regex=True)
-    npi_clean = npi_clean.replace("", None).replace("nan", None)
-
-    # Clean Profile ID
-    profile_series = df[profile_col] if profile_col and profile_col in df.columns else pd.Series([None] * n,
-                                                                                                 index=df.index)
-    profile_clean = profile_series.astype(str).str.strip()
-    profile_clean = profile_clean.replace("", None).replace("nan", None)
-
-    # Build physician name (vectorized concatenation)
-    first_col = colmap.get("phys_first")
-    middle_col = colmap.get("phys_middle")
-    last_col = colmap.get("phys_last")
-
-    first = df[first_col].astype(str).str.strip() if first_col and first_col in df.columns else pd.Series([""] * n,
-                                                                                                          index=df.index)
-    middle = df[middle_col].astype(str).str.strip() if middle_col and middle_col in df.columns else pd.Series([""] * n,
-                                                                                                              index=df.index)
-    last = df[last_col].astype(str).str.strip() if last_col and last_col in df.columns else pd.Series([""] * n,
-                                                                                                      index=df.index)
-
-    # Concatenate name parts (handle NaN values from CSV)
-    first = first.replace("nan", "").replace("NaN", "")
-    middle = middle.replace("nan", "").replace("NaN", "")
-    last = last.replace("nan", "").replace("NaN", "")
-
-    phys_name_raw = (first + " " + middle + " " + last).str.replace(r"\s+", " ", regex=True).str.strip()
-    phys_name_raw = phys_name_raw.replace("", None).replace("nan", None).replace("NaN", None)
-    phys_name_norm = phys_name_raw.map(lambda x: normalize_name(x) if x else None)
-
-    # Other physician fields
-    specialty_col = colmap.get("phys_specialty")
-    primary_type_col = colmap.get("phys_primary_type")
-
-    phys_specialty = df[specialty_col] if specialty_col and specialty_col in df.columns else pd.Series([None] * n,
-                                                                                                       index=df.index)
-    phys_primary_type = df[primary_type_col] if primary_type_col and primary_type_col in df.columns else pd.Series(
-        [None] * n, index=df.index)
-    phys_state = df[state_col] if state_col and state_col in df.columns else pd.Series([None] * n, index=df.index)
-    phys_zip5 = df[zip_col].map(normalize_zip5) if zip_col and zip_col in df.columns else pd.Series([None] * n,
-                                                                                                    index=df.index)
-
-    # Build payee_key (priority: NPI > Profile > Hash)
-    # This requires some row-wise logic for hash fallback, but most rows have NPI/Profile
-    payee_key = pd.Series([None] * n, index=df.index, dtype=object)
-    payee_type = pd.Series(["physician"] * n, index=df.index)
-
-    # Hospitals
-    payee_type = payee_type.where(~is_hospital, "teaching_hospital")
-
-    # For hospitals: use hospital_id or hash(name+zip)
-    for idx in df.index[is_hospital]:
-        hid = hosp_id_series.loc[idx]
-        # Check for actual None or pandas NA
-        if pd.notna(hid) and str(hid).strip() and str(hid).lower() != 'nan':
-            payee_key.loc[idx] = f"HOSP_ID:{hid}"
-        else:
-            hname = hosp_name_norm.loc[idx]
-            hzip = hosp_zip5.loc[idx]
-            payee_key.loc[
-                idx] = f"HOSP_NAMEZIP:{stable_hash_hex([hname if pd.notna(hname) else None, hzip if pd.notna(hzip) else None])}"
-
-    # For physicians: use NPI > Profile > hash(name+zip)
-    for idx in df.index[~is_hospital]:
-        npi = npi_clean.loc[idx]
-        prof = profile_clean.loc[idx]
-
-        # Check for valid NPI (not None, not empty, not 'nan' string)
-        if pd.notna(npi) and str(npi).strip() and str(npi).lower() != 'nan':
-            payee_key.loc[idx] = f"PHYS_NPI:{npi}"
-        elif pd.notna(prof) and str(prof).strip() and str(prof).lower() != 'nan':
-            payee_key.loc[idx] = f"PHYS_PROF:{prof}"
-        else:
-            pname = phys_name_norm.loc[idx]
-            pzip = phys_zip5.loc[idx]
-            payee_key.loc[
-                idx] = f"PHYS_NAMEZIP:{stable_hash_hex([pname if pd.notna(pname) else None, pzip if pd.notna(pzip) else None])}"
-
-    # Return all fields with appropriate nulls based on payee_type
-    return {
-        "payee_type": payee_type,
-        "payee_key": payee_key,
-        "physician_npi": npi_clean.where(~is_hospital, None),
-        "physician_profile_id": profile_clean.where(~is_hospital, None),
-        "physician_name_raw": phys_name_raw.where(~is_hospital, None),
-        "physician_name_norm": phys_name_norm.where(~is_hospital, None),
-        "physician_specialty": phys_specialty.where(~is_hospital, None),
-        "physician_primary_type": phys_primary_type.where(~is_hospital, None),
-        "physician_state": phys_state.where(~is_hospital, None),
-        "physician_zip5": phys_zip5.where(~is_hospital, None),
-        "teaching_hospital_id": hosp_id_series.where(is_hospital, None),
-        "teaching_hospital_name_raw": hosp_name_raw.where(is_hospital, None),
-        "teaching_hospital_name_norm": hosp_name_norm.where(is_hospital, None),
-        "teaching_hospital_state": hosp_state.where(is_hospital, None),
-        "teaching_hospital_zip5": hosp_zip5.where(is_hospital, None),
-    }
-
-
-def canonicalize_chunk(df: pd.DataFrame, cfg: CleanConfig, source_file: str) -> pd.DataFrame:
-    """
-    Transform raw CMS Open Payments data into canonical schema.
-    Uses factual CMS column mappings - no assumptions.
-    """
-    # Reset index to avoid alignment issues with chunked reading
-    df = df.reset_index(drop=True)
-
-    colmap = get_column_mapping(df, cfg.dataset_type, cfg.column_mapping)
-
-    # Extract fields using mapped column names (no fallback assumptions)
-    payer_name_col = colmap.get("payer_name")
-    if not payer_name_col:
-        raise ValueError(f"Required column 'payer_name' not found in dataset_type '{cfg.dataset_type}'")
-
-    amount_col = colmap.get("amount")
-    if not amount_col:
-        raise ValueError(f"Required column 'amount' not found in dataset_type '{cfg.dataset_type}'")
-
-    payer_raw = df[payer_name_col].astype("string", errors="ignore")
-    payer_norm = payer_raw.map(lambda x: normalize_name(x))
-
-    amount_raw = df[amount_col]
-    amount = amount_raw.map(safe_float).astype("float64")
-
-    date_col = colmap.get("date")
-    date_raw = df[date_col] if date_col else pd.Series([None] * len(df), index=df.index)
-    payment_date = date_raw.map(parse_date)
-
-    # Optional fields - may not exist in all dataset types
-    nature_col = colmap.get("nature")
-    form_col = colmap.get("form")
-    context_col = colmap.get("context")
-    product_col = colmap.get("product")
-    flag_col = colmap.get("drug_device_flag")
-
-    nature = df[nature_col] if nature_col else pd.Series([None] * len(df), index=df.index)
-    form = df[form_col] if form_col else pd.Series([None] * len(df), index=df.index)
-    context = df[context_col] if context_col else pd.Series([None] * len(df), index=df.index)
-    product = df[product_col] if product_col else pd.Series([None] * len(df), index=df.index)
-    flag = df[flag_col] if flag_col else pd.Series([None] * len(df), index=df.index)
-
-    payer_id_col = colmap.get("payer_id")
-    payer_state_col = colmap.get("payer_state")
-    payer_country_col = colmap.get("payer_country")
-
-    payer_id = df[payer_id_col] if payer_id_col else pd.Series([None] * len(df), index=df.index)
-    payer_state = df[payer_state_col] if payer_state_col else pd.Series([None] * len(df), index=df.index)
-    payer_country = df[payer_country_col] if payer_country_col else pd.Series([None] * len(df), index=df.index)
-
-    # Build payee fields (vectorized for performance)
-    payee_fields = build_payee_fields_vectorized(df, colmap)
-
-    # Normalize product flag into boolean
-    flag_clean = flag.astype(str).str.strip().str.upper()
-    is_product_related = (
-            flag_clean.notna() &
-            (flag_clean != "") &
-            (flag_clean != "NAN") &
-            (flag_clean != "NONE")
-    )
-
-    def quarter_from_iso(d: Optional[str]) -> Optional[int]:
-        if d is None:
-            return None
-        try:
-            m = int(d.split("-")[1])
-            return (m - 1) // 3 + 1
-        except Exception:
-            return None
-
-    payment_quarter = payment_date.map(quarter_from_iso)
-
-    is_valid = (
-            amount.notna() &
-            (amount >= 0) &
-            payer_norm.notna() &
-            (payer_norm.astype(str).str.len() > 0) &
-            payee_fields["payee_key"].notna() &
-            (payee_fields["payee_key"].astype(str).str.len() > 0)
-    )
-
-    drop_reason = pd.Series([None] * len(df), dtype="string", index=df.index)
-    drop_reason = drop_reason.mask(amount.isna(), "missing_amount")
-    drop_reason = drop_reason.mask(amount.notna() & (amount < 0), "negative_amount")
-    drop_reason = drop_reason.mask(payer_norm.isna() | (payer_norm.astype(str).str.len() == 0), "missing_payer")
-    drop_reason = drop_reason.mask(
-        payee_fields["payee_key"].isna() | (payee_fields["payee_key"].astype(str).str.len() == 0), "missing_payee")
-    drop_reason = drop_reason.where(~is_valid, drop_reason)
-
-    hash_inputs = []
-    for i in range(len(payer_norm)):
-        hash_input = [
-            str(cfg.program_year),
-            cfg.dataset_type,
-            payer_norm.iloc[i],
-            payee_fields["payee_key"].iloc[i],
-            str(amount.iloc[i]) if pd.notna(amount.iloc[i]) else None,
-            payment_date.iloc[i],
-            str(nature.iloc[i]) if pd.notna(nature.iloc[i]) else None,
-        ]
-        hash_inputs.append(hash_input)
-
-    record_id = pd.Series([stable_hash_hex(h) for h in hash_inputs], index=df.index, dtype="string")
-
-    out = pd.DataFrame({
-        "record_id": record_id,
-        "program_year": np.int16(cfg.program_year),
-        "dataset_type": cfg.dataset_type,
-        "source_file": source_file if cfg.keep_source_file else None,
-
-        "payer_name_raw": payer_raw,
-        "payer_name_norm": payer_norm,
-        "payer_id": payer_id.astype("string", errors="ignore"),
-        "payer_state": payer_state.astype("string", errors="ignore"),
-        "payer_country": payer_country.astype("string", errors="ignore"),
-
-        "payee_type": payee_fields["payee_type"],
-        "payee_key": payee_fields["payee_key"],
-
-        "physician_npi": payee_fields["physician_npi"].astype("string", errors="ignore"),
-        "physician_profile_id": payee_fields["physician_profile_id"].astype("string", errors="ignore"),
-        "physician_name_raw": payee_fields["physician_name_raw"].astype("string", errors="ignore"),
-        "physician_name_norm": payee_fields["physician_name_norm"].astype("string", errors="ignore"),
-        "physician_specialty": payee_fields["physician_specialty"].astype("string", errors="ignore"),
-        "physician_primary_type": payee_fields["physician_primary_type"].astype("string", errors="ignore"),
-        "physician_state": payee_fields["physician_state"].astype("string", errors="ignore"),
-        "physician_zip5": payee_fields["physician_zip5"].astype("string", errors="ignore"),
-
-        "teaching_hospital_id": payee_fields["teaching_hospital_id"].astype("string", errors="ignore"),
-        "teaching_hospital_name_raw": payee_fields["teaching_hospital_name_raw"].astype("string", errors="ignore"),
-        "teaching_hospital_name_norm": payee_fields["teaching_hospital_name_norm"].astype("string", errors="ignore"),
-        "teaching_hospital_state": payee_fields["teaching_hospital_state"].astype("string", errors="ignore"),
-        "teaching_hospital_zip5": payee_fields["teaching_hospital_zip5"].astype("string", errors="ignore"),
-
-        "amount_usd": amount,
-        "payment_date": payment_date,
-        "payment_quarter": payment_quarter,
-
-        "nature_of_payment": nature.astype("string", errors="ignore"),
-        "form_of_payment": form.astype("string", errors="ignore"),
-        "payment_context": context.astype("string", errors="ignore"),
-        "product_name": product.astype("string", errors="ignore"),
-        "associated_covered_drug_or_device_flag": flag.astype("string", errors="ignore"),
-        "is_product_related": is_product_related.astype(bool),
-
-        "is_valid": is_valid.astype(bool),
-        "drop_reason": drop_reason.astype("string", errors="ignore"),
-    })
-
-    # Ensure all canonical columns exist
-    for c in CANONICAL_COLS:
-        if c not in out.columns:
-            out[c] = None
-
-    return out[CANONICAL_COLS]
-
-
-# ---------------------------
+# ---------------------------------------------------------------------------
 # IO helpers
-# ---------------------------
+# ---------------------------------------------------------------------------
 
 def ensure_dir(path: str) -> None:
     Path(path).mkdir(parents=True, exist_ok=True)
 
 
-def write_df(df: pd.DataFrame, path: str, fmt: str) -> None:
-    if fmt == "parquet":
-        df.to_parquet(path, index=False)
-    elif fmt == "csv":
-        df.to_csv(path, index=False)
-    else:
-        raise ValueError(f"Unsupported format: {fmt}")
+def _write_partitioned_parquet(df: pd.DataFrame, output_dir: Path, part_num: int) -> None:
+    """Write *df* as a single named parquet partition file.
 
-
-def write_partitioned_parquet(df: pd.DataFrame, output_dir: Path, part_num: int) -> None:
-    """
-    Write a single parquet partition. Much faster than append for large datasets.
-    Phase 2 can read all parts as a dataset.
+    Files are named ``part-{part_num:05d}.parquet`` so they sort correctly and
+    can be read as a dataset by Phase 2.
     """
     part_file = output_dir / f"part-{part_num:05d}.parquet"
-    df.to_parquet(part_file, index=False)
+    df.to_parquet(str(part_file), index=False)
 
 
-# ---------------------------
-# Main
-# ---------------------------
+# ---------------------------------------------------------------------------
+# Sampling (head-slice, deterministic — no random indexes)
+# ---------------------------------------------------------------------------
 
-def run(cfg: CleanConfig, config_path: str = None) -> None:
+def _apply_sampling(canon: pd.DataFrame, fraction: float) -> pd.DataFrame:
+    """Return the first ``fraction * len(canon)`` rows of *canon*.
+
+    This head-slice approach is:
+    * **Deterministic** — same rows every run for the same input order.
+    * **Cache-friendly** — reads contiguous memory, no index scatter.
+    * **No random state** — seed is intentionally unused here.
+
+    When ``fraction >= 0.9999`` the full DataFrame is returned unchanged.
     """
-    Phase 1: Clean CMS Open Payments data into canonical schema.
+    if fraction >= 0.9999 or len(canon) == 0:
+        return canon
+    n_keep = max(1, int(round(len(canon) * fraction)))
+    return canon.iloc[:n_keep].reset_index(drop=True)
 
-    Args:
-        cfg: CleanConfig with processing parameters
-        config_path: Path to config file (for fingerprinting)
+
+# ---------------------------------------------------------------------------
+# Main phase runner
+# ---------------------------------------------------------------------------
+
+def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
+    """Execute Phase 1 sequential cleaning and write all artefacts.
+
+    Progress is reported via:
+    * ``tqdm`` chunk progress bar (one bar per input file).
+    * ``logging.info`` stage banners at each major milestone.
+
+    No threads, no processes, no Numba are used.
+
+    Parameters
+    ----------
+    cfg:
+        Fully resolved pipeline configuration.  ``cfg.max_workers`` is ignored
+        — this pipeline is always single-threaded.
+    config_path:
+        When provided, the YAML is copied to ``<output_dir>/config_used.yaml``
+        and a dataset fingerprint is written to
+        ``<output_dir>/dataset_fingerprint.json``.
     """
+    t_phase_start = time.perf_counter()
+    timings: Dict[str, float] = {}
+
     out_dir = Path(cfg.output_dir)
     ensure_dir(str(out_dir))
 
-    # Create dataset fingerprint for reproducibility
+    # ── Stage 1: Reproducibility artefacts ───────────────────────────────────
+    logging.info("[Phase 1] ── Stage 1/5: Writing reproducibility artefacts ──")
     if config_path:
-        logging.info("Creating dataset fingerprint for reproducibility...")
         fingerprint = create_dataset_fingerprint(cfg, config_path)
-        fingerprint_path = out_dir / "dataset_fingerprint.json"
-        with open(fingerprint_path, "w", encoding="utf-8") as f:
+        fp_path = out_dir / "dataset_fingerprint.json"
+        with open(fp_path, "w", encoding="utf-8") as f:
             json.dump(fingerprint, f, indent=2)
-        logging.info("Wrote dataset fingerprint: %s", fingerprint_path)
+        logging.info("[Phase 1] Wrote fingerprint: %s", fp_path)
 
-        config_copy_path = out_dir / "config_used.yaml"
-        with open(config_path, 'r', encoding='utf-8') as src:
-            with open(config_copy_path, 'w', encoding='utf-8') as dst:
-                dst.write(src.read())
-        logging.info("Saved config snapshot: %s", config_copy_path)
+        config_copy = out_dir / "config_used.yaml"
+        with open(config_path, "r", encoding="utf-8") as src, \
+             open(config_copy, "w", encoding="utf-8") as dst:
+            dst.write(src.read())
+        logging.info("[Phase 1] Saved config snapshot: %s", config_copy)
 
-    # Use partitioned output for parquet (much faster)
-    clean_dir = out_dir / "payments_clean"
-    rej_dir = out_dir / "payments_rejected"
-    clean_path = out_dir / "payments_clean.csv"
-    rej_path = out_dir / "payments_rejected.csv"
+    # ── Output paths ─────────────────────────────────────────────────────────
+    clean_dir  = out_dir / "payments_clean"
+    rej_dir    = out_dir / "payments_rejected"
+    clean_csv  = out_dir / "payments_clean.csv"
+    rej_csv    = out_dir / "payments_rejected.csv"
+    report_path = out_dir / "cleaning_report.json"
 
     if cfg.write_format == "parquet":
         ensure_dir(str(clean_dir))
         if not cfg.skip_rejected:
             ensure_dir(str(rej_dir))
-        # clear
-        for part in clean_dir.glob("part-*.parquet"):
-            part.unlink()
+        for p in clean_dir.glob("part-*.parquet"):
+            p.unlink()
         if not cfg.skip_rejected:
-            for part in rej_dir.glob("part-*.parquet"):
-                part.unlink()
+            for p in rej_dir.glob("part-*.parquet"):
+                p.unlink()
     else:
-        if clean_path.exists():
-            clean_path.unlink()
-        if not cfg.skip_rejected and rej_path.exists():
-            rej_path.unlink()
+        if clean_csv.exists():
+            clean_csv.unlink()
+        if not cfg.skip_rejected and rej_csv.exists():
+            rej_csv.unlink()
 
-    report_path = out_dir / "cleaning_report.json"
     if report_path.exists():
         report_path.unlink()
 
-    rows_in = 0
-    rows_valid = 0
-    rows_rejected = 0
-    rows_after_sampling = 0
-    amounts = []
-    part_num = 0
+    # ── Accumulators ─────────────────────────────────────────────────────────
+    rows_in           = 0
+    rows_after_sample = 0
+    rows_valid        = 0
+    rows_rejected     = 0
+    part_num          = 0
+    amounts: List[np.ndarray] = []
+    physician_count   = 0
+    hospital_count    = 0
+    missing_npi       = 0
+    missing_profile   = 0
+    missing_hosp_id   = 0
+    manifest_clean: List[Dict]    = []
+    manifest_rejected: List[Dict] = []
 
-    # Extended statistics for paper
-    physician_count = 0
-    hospital_count = 0
-    missing_npi = 0
-    missing_profile = 0
-    missing_hosp_id = 0
+    do_sampling = cfg.sampling_fraction < 0.9999
 
-    # FIX 3: Track manifest for part files (reproducibility + Phase 2 debugging)
-    manifest_clean = []
-    manifest_rejected = []
-
-    logging.info("Starting Phase 1 clean. year=%s dataset_type=%s sampling=%.3f seed=%s", cfg.program_year, cfg.dataset_type, cfg.sampling_fraction, cfg.sampling_seed)
-
-    t_phase_start = time.perf_counter()
+    logging.info(
+        "[Phase 1] ── Stage 2/5: Reading + cleaning chunks ──  "
+        "(dataset=%s year=%d sampling=%.3f)",
+        cfg.dataset_type, cfg.program_year, cfg.sampling_fraction,
+    )
+    t_read_start = time.perf_counter()
 
     for fpath in cfg.input_files:
         fpath = str(fpath)
-        logging.info("Reading file: %s", fpath)
+        fname = Path(fpath).name
 
-        # Count total rows first for accurate progress bar
-        logging.info("Counting rows in %s...", Path(fpath).name)
-        total_rows = sum(1 for _ in open(fpath, 'r', encoding='utf-8')) - 1  # subtract header
-        total_chunks = (total_rows + cfg.chunk_size - 1) // cfg.chunk_size
-        logging.info("File has %d rows (%d chunks of size %d)", total_rows, total_chunks, cfg.chunk_size)
+        # Count rows upfront so tqdm shows accurate totals
+        logging.info("[Phase 1] Counting rows in %s ...", fname)
+        with open(fpath, "r", encoding="utf-8") as fh:
+            total_rows = sum(1 for _ in fh) - 1  # subtract header
+        total_chunks = max(1, (total_rows + cfg.chunk_size - 1) // cfg.chunk_size)
+        logging.info(
+            "[Phase 1] %s: %d rows → %d chunks of %d",
+            fname, total_rows, total_chunks, cfg.chunk_size,
+        )
 
-        # Robust CSV reading with explicit parameters
         reader = pd.read_csv(
             fpath,
             chunksize=cfg.chunk_size,
             low_memory=False,
-            dtype=str,  # ingest as string first; we parse deterministically
+            dtype=str,          # ingest as string; we parse deterministically
             encoding="utf-8",
             sep=",",
             engine="c",
         )
 
-        for chunk in tqdm(reader, total=total_chunks, desc=f"Processing {Path(fpath).name}", unit="chunk"):
-            rows_in += len(chunk)
-            canon = canonicalize_chunk(chunk, cfg, source_file=Path(fpath).name)
+        chunk_iter = (
+            _tqdm(reader, total=total_chunks, desc=f"  Cleaning {fname}", unit="chunk")
+            if _HAS_TQDM else reader
+        )
 
-            # Apply deterministic sampling before validity split
-            sample_mask = sampling_mask_from_record_ids(canon["record_id"], cfg.sampling_fraction, cfg.sampling_seed)
-            canon = canon.loc[sample_mask].reset_index(drop=True)
-            rows_after_sampling += len(canon)
+        for chunk in chunk_iter:
+            rows_in += len(chunk)
+            canon = canonicalize_chunk(chunk, cfg, source_file=fname)
+
+            # Deterministic head-slice sampling
+            if do_sampling:
+                canon = _apply_sampling(canon, cfg.sampling_fraction)
+
+            rows_after_sample += len(canon)
             if len(canon) == 0:
                 continue
 
-            valid = canon[canon["is_valid"]].copy()
-            rej = canon[~canon["is_valid"]].copy()
+            valid_df = canon[canon["is_valid"]].copy()
+            rej_df   = canon[~canon["is_valid"]].copy()
 
-            rows_valid += len(valid)
-            rows_rejected += len(rej)
+            rows_valid    += len(valid_df)
+            rows_rejected += len(rej_df)
 
-            if len(valid) > 0:
-                amounts.append(valid["amount_usd"].to_numpy())
+            if len(valid_df) > 0:
+                amounts.append(valid_df["amount_usd"].to_numpy())
+                physician_count += int((valid_df["payee_type"] == "physician").sum())
+                hospital_count  += int((valid_df["payee_type"] == "teaching_hospital").sum())
 
-                # Track payee types
-                physician_count += (valid["payee_type"] == "physician").sum()
-                hospital_count += (valid["payee_type"] == "teaching_hospital").sum()
+                phys_rows = valid_df[valid_df["payee_type"] == "physician"]
+                hosp_rows = valid_df[valid_df["payee_type"] == "teaching_hospital"]
+                missing_npi     += int(phys_rows["physician_npi"].isna().sum())
+                missing_profile += int(phys_rows["physician_profile_id"].isna().sum())
+                missing_hosp_id += int(hosp_rows["teaching_hospital_id"].isna().sum())
 
-                # FIX 2: Track missing IDs on correct subgroup
-                # Physician fields should only be checked on physician rows
-                # Hospital fields should only be checked on hospital rows
-                phys_rows = valid[valid["payee_type"] == "physician"]
-                hosp_rows = valid[valid["payee_type"] == "teaching_hospital"]
-
-                missing_npi += phys_rows["physician_npi"].isna().sum()
-                missing_profile += phys_rows["physician_profile_id"].isna().sum()
-                missing_hosp_id += hosp_rows["teaching_hospital_id"].isna().sum()
-
-            # Write outputs incrementally
+            # ── Write outputs ────────────────────────────────────────────────
             if cfg.write_format == "parquet":
-                # Track manifest entries for reproducibility
-                clean_rows = len(valid)
-                rej_rows = len(rej)
-
-                if clean_rows > 0:
-                    write_partitioned_parquet(valid, clean_dir, part_num)
+                if len(valid_df) > 0:
+                    _write_partitioned_parquet(valid_df, clean_dir, part_num)
                     manifest_clean.append({
-                        "part_file": f"part-{part_num:05d}.parquet",
-                        "row_count": clean_rows,
-                        "source_file": Path(fpath).name,
+                        "part_file":   f"part-{part_num:05d}.parquet",
+                        "row_count":   len(valid_df),
+                        "source_file": fname,
                     })
-
-                if rej_rows > 0 and not cfg.skip_rejected:
-                    write_partitioned_parquet(rej, rej_dir, part_num)
+                if len(rej_df) > 0 and not cfg.skip_rejected:
+                    _write_partitioned_parquet(rej_df, rej_dir, part_num)
                     manifest_rejected.append({
-                        "part_file": f"part-{part_num:05d}.parquet",
-                        "row_count": rej_rows,
-                        "source_file": Path(fpath).name,
+                        "part_file":   f"part-{part_num:05d}.parquet",
+                        "row_count":   len(rej_df),
+                        "source_file": fname,
                     })
-
                 part_num += 1
             else:
-                # CSV append (write header only once)
-                header = not clean_path.exists()
-                if len(valid) > 0:
-                    valid.to_csv(clean_path, mode="a", index=False, header=header)
-                header2 = not rej_path.exists()
-                if len(rej) > 0 and not cfg.skip_rejected:
-                    rej.to_csv(rej_path, mode="a", index=False, header=header2)
+                # CSV append mode (header written only on first chunk)
+                header_clean = not clean_csv.exists()
+                if len(valid_df) > 0:
+                    valid_df.to_csv(str(clean_csv), mode="a", index=False, header=header_clean)
+                if len(rej_df) > 0 and not cfg.skip_rejected:
+                    header_rej = not rej_csv.exists()
+                    rej_df.to_csv(str(rej_csv), mode="a", index=False, header=header_rej)
 
-    total_time = time.perf_counter() - t_phase_start
+    timings["t_read_and_clean"] = round(time.perf_counter() - t_read_start, 4)
+    logging.info(
+        "[Phase 1] Stage 2 done | rows_in=%d rows_sampled=%d rows_valid=%d | elapsed=%.2fs",
+        rows_in, rows_after_sample, rows_valid, timings["t_read_and_clean"],
+    )
 
-    # Summaries
+    # ── Stage 3: Manifests ────────────────────────────────────────────────────
+    logging.info("[Phase 1] ── Stage 3/5: Writing partition manifests ──")
+    if cfg.write_format == "parquet":
+        clean_manifest_path = out_dir / "payments_clean_manifest.json"
+        with open(clean_manifest_path, "w", encoding="utf-8") as f:
+            json.dump({"total_parts": len(manifest_clean), "total_rows": rows_valid, "parts": manifest_clean}, f, indent=2)
+        logging.info("[Phase 1] Wrote clean manifest (%d parts)", len(manifest_clean))
+
+        if not cfg.skip_rejected:
+            rej_manifest_path = out_dir / "payments_rejected_manifest.json"
+            with open(rej_manifest_path, "w", encoding="utf-8") as f:
+                json.dump({"total_parts": len(manifest_rejected), "total_rows": rows_rejected, "parts": manifest_rejected}, f, indent=2)
+            logging.info("[Phase 1] Wrote rejected manifest (%d parts)", len(manifest_rejected))
+
+    # ── Stage 4: Amount statistics ────────────────────────────────────────────
+    logging.info("[Phase 1] ── Stage 4/5: Computing statistics ──")
+    t_stats_start = time.perf_counter()
     if amounts:
         all_amt = np.concatenate(amounts)
         amt_stats = {
-            "min": float(np.nanmin(all_amt)) if len(all_amt) else None,
-            "mean": float(np.nanmean(all_amt)) if len(all_amt) else None,
-            "median": float(np.nanmedian(all_amt)) if len(all_amt) else None,
-            "max": float(np.nanmax(all_amt)) if len(all_amt) else None,
+            "min":    float(np.nanmin(all_amt)),
+            "mean":   float(np.nanmean(all_amt)),
+            "median": float(np.nanmedian(all_amt)),
+            "max":    float(np.nanmax(all_amt)),
         }
     else:
         amt_stats = {"min": None, "mean": None, "median": None, "max": None}
 
-    # Calculate missingness rates for key identifiers
-    physician_missing_npi_pct = (missing_npi / physician_count * 100) if physician_count > 0 else None
-    physician_missing_profile_pct = (missing_profile / physician_count * 100) if physician_count > 0 else None
-    hospital_missing_id_pct = (missing_hosp_id / hospital_count * 100) if hospital_count > 0 else None
+    phys_npi_pct     = (missing_npi     / physician_count * 100) if physician_count else None
+    phys_prof_pct    = (missing_profile / physician_count * 100) if physician_count else None
+    hosp_id_pct      = (missing_hosp_id / hospital_count  * 100) if hospital_count  else None
+    timings["t_stats"] = round(time.perf_counter() - t_stats_start, 4)
+
+    # ── Stage 5: Cleaning report ──────────────────────────────────────────────
+    logging.info("[Phase 1] ── Stage 5/5: Writing cleaning report ──")
+    total_time = time.perf_counter() - t_phase_start
 
     report = {
         "dataset_type": cfg.dataset_type,
         "program_year": cfg.program_year,
-        "rows_in": int(rows_in),
-        "rows_after_sampling": int(rows_after_sampling),
-        "rows_valid": int(rows_valid),
-        "rows_rejected": int(rows_rejected) if not cfg.skip_rejected else 0,
+        "rows_in":            int(rows_in),
+        "rows_after_sampling": int(rows_after_sample),
+        "rows_valid":         int(rows_valid),
+        "rows_rejected":      int(rows_rejected) if not cfg.skip_rejected else 0,
+        "valid_rate": float(rows_valid / rows_after_sample) if rows_after_sample else None,
         "sampling": {
-            "fraction": float(cfg.sampling_fraction),
-            "seed": cfg.sampling_seed,
-            "enabled": cfg.sampling_fraction < 0.9999,
-            "rows_before_sampling": int(rows_in),
-            "rows_after_sampling": int(rows_after_sampling),
-            "retention_rate": float(rows_after_sampling / rows_in) if rows_in else None,
+            "fraction":          float(cfg.sampling_fraction),
+            "seed":              cfg.sampling_seed,
+            "enabled":           do_sampling,
+            "strategy":          "head_slice_first_x_percent",
+            "rows_before":       int(rows_in),
+            "rows_after":        int(rows_after_sample),
+            "retention_rate":    float(rows_after_sample / rows_in) if rows_in else None,
         },
-        "valid_rate": float(rows_valid / rows_after_sampling) if rows_after_sampling else None,
         "amount_usd_stats": amt_stats,
-
-        # Payee type breakdown
         "payee_counts": {
-            "physicians": int(physician_count),
+            "physicians":         int(physician_count),
             "teaching_hospitals": int(hospital_count),
         },
-
-        # Identifier completeness (for Dataset Quality Summary)
         "identifier_missingness": {
-            "physician_npi_missing_count": int(missing_npi),
-            "physician_npi_missing_pct": float(
-                physician_missing_npi_pct) if physician_missing_npi_pct is not None else None,
+            "physician_npi_missing_count":     int(missing_npi),
+            "physician_npi_missing_pct":       float(phys_npi_pct)  if phys_npi_pct  is not None else None,
             "physician_profile_missing_count": int(missing_profile),
-            "physician_profile_missing_pct": float(
-                physician_missing_profile_pct) if physician_missing_profile_pct is not None else None,
-            "hospital_id_missing_count": int(missing_hosp_id),
-            "hospital_id_missing_pct": float(hospital_missing_id_pct) if hospital_missing_id_pct is not None else None,
+            "physician_profile_missing_pct":   float(phys_prof_pct) if phys_prof_pct is not None else None,
+            "hospital_id_missing_count":       int(missing_hosp_id),
+            "hospital_id_missing_pct":         float(hosp_id_pct)   if hosp_id_pct   is not None else None,
         },
-
-        "timings_sec": {
-            "total": round(total_time, 4),
-        },
-
+        "timings_sec": {"total": round(total_time, 4), **timings},
         "reproducibility": {
-            "normalization_version": NORMALIZATION_VERSION,
+            "normalization_version":     NORMALIZATION_VERSION,
             "normalization_description": NORMALIZATION_DESCRIPTION,
-            "hash_function": HASH_FUNCTION,
-            "fingerprint_file": "dataset_fingerprint.json",
-            "config_snapshot_file": "config_used.yaml",
+            "hash_function":             HASH_FUNCTION,
+            "fingerprint_file":          "dataset_fingerprint.json",
+            "config_snapshot_file":      "config_used.yaml",
+            "max_workers":               1,
+            "uses_numba":                False,
         },
-
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     with open(report_path, "w", encoding="utf-8") as f:
         json.dump(report, f, indent=2)
 
-    # FIX 3: Write manifest files for part tracking
-    # Save manifests in parent directory to avoid interfering with parquet reads
+    logging.info("[Phase 1] ══ Cleaning completed in %.2fs ══", total_time)
     if cfg.write_format == "parquet":
-        manifest_clean_path = out_dir / "payments_clean_manifest.json"
-        manifest_rejected_path = out_dir / "payments_rejected_manifest.json"
-
-        with open(manifest_clean_path, "w", encoding="utf-8") as f:
-            json.dump({
-                "total_parts": len(manifest_clean),
-                "total_rows": rows_valid,
-                "parts": manifest_clean,
-            }, f, indent=2)
-
+        logging.info("  Clean partitions : %s (%d parts)", clean_dir, part_num)
         if not cfg.skip_rejected:
-            with open(manifest_rejected_path, "w", encoding="utf-8") as f:
-                json.dump({
-                    "total_parts": len(manifest_rejected),
-                    "total_rows": rows_rejected,
-                    "parts": manifest_rejected,
-                }, f, indent=2)
-
-                logging.info("Wrote manifest: %s", manifest_rejected_path)
-
-    logging.info("Done.")
-    if cfg.write_format == "parquet":
-        logging.info("Wrote clean partitions: %s (%d parts)", clean_dir, part_num)
-        if not cfg.skip_rejected:
-            logging.info("Wrote rejected partitions: %s (%d parts)", rej_dir, part_num)
+            logging.info("  Rejected partitions: %s (%d parts)", rej_dir, part_num)
     else:
-        logging.info("Wrote: %s", clean_path)
+        logging.info("  Clean CSV        : %s", clean_csv)
         if not cfg.skip_rejected:
-            logging.info("Wrote: %s", rej_path)
-    logging.info("Wrote: %s", report_path)
+            logging.info("  Rejected CSV     : %s", rej_csv)
+    logging.info("  Report           : %s", report_path)
 
+
+# ---------------------------------------------------------------------------
+# Pipeline entry-point (called from run_pipeline.py)
+# ---------------------------------------------------------------------------
 
 def run_from_pipeline(
     pipeline_cfg: Dict,
@@ -1080,41 +405,46 @@ def run_from_pipeline(
     run_id: str,
     dataset_name: str,
 ) -> Dict:
+    """Construct a ``CleanConfig`` from a pipeline dict and run Phase 1.
+
+    Returns a timing / artefact summary dict consumed by the pipeline runner.
+    ``max_workers`` from the pipeline config is silently ignored and kept at 1.
+    """
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    phase_cfg = pipeline_cfg.get("phase1_clean", {})
-    dataset_cfg = pipeline_cfg.get("dataset", {})
-    inputs_cfg = pipeline_cfg.get("inputs", {})
-    config_dir = Path(pipeline_cfg.get("__config_dir", Path.cwd()))
+    phase_cfg   = pipeline_cfg.get("phase1_clean", {}) or {}
+    dataset_cfg = pipeline_cfg.get("dataset", {}) or {}
+    inputs_cfg  = pipeline_cfg.get("inputs", {}) or {}
+    config_dir  = Path(pipeline_cfg.get("__config_dir", Path.cwd()))
 
     payment_type = str(dataset_cfg.get("payment_type", "general_payment"))
     type_map = {
-        "general": "general_payment",
-        "general_payment": "general_payment",
-        "research": "research_payment",
+        "general":          "general_payment",
+        "general_payment":  "general_payment",
+        "research":         "research_payment",
         "research_payment": "research_payment",
-        "ownership": "ownership",
+        "ownership":        "ownership",
     }
     dataset_type = type_map.get(payment_type, payment_type)
+    program_year = int(phase_cfg.get(
+        "program_year", dataset_cfg.get("year", dataset_cfg.get("program_year", 2024))
+    ))
 
-    program_year = int(phase_cfg.get("program_year", dataset_cfg.get("year", dataset_cfg.get("program_year", 2024))))
-
-    raw_inputs = inputs_cfg.get("csv_files")
-    if raw_inputs is None or raw_inputs == []:
-        raw_inputs = inputs_cfg.get("csv_glob", [])
+    raw_inputs = inputs_cfg.get("csv_files") or inputs_cfg.get("csv_glob", [])
     if isinstance(raw_inputs, str):
         raw_inputs = [raw_inputs]
-    input_candidates = list(raw_inputs or [])
-    if not input_candidates:
+    if not raw_inputs:
         raise ValueError("pipeline_cfg.inputs.csv_files is required for phase1_clean")
 
-    input_files = []
-    for f in input_candidates:
+    input_files: List[str] = []
+    for f in list(raw_inputs):
         p = Path(f)
         if not p.is_absolute():
             p = config_dir / f
         input_files.append(str(p.resolve()))
+
+    sampling_cfg = phase_cfg.get("sampling", {}) or {}
 
     cfg = CleanConfig(
         dataset_type=dataset_type,
@@ -1125,24 +455,24 @@ def run_from_pipeline(
         write_format=str(phase_cfg.get("write_format", "parquet")),
         keep_source_file=bool(phase_cfg.get("keep_source_file", True)),
         column_mapping=phase_cfg.get("column_mapping"),
-        max_workers=int(phase_cfg.get("max_workers", phase_cfg.get("num_workers", 1))),
-        skip_rejected=bool(phase_cfg.get("skip_rejected", True)),
-        sampling_fraction=float(phase_cfg.get("sampling", {}).get("fraction", 1.0)),
-        sampling_seed=phase_cfg.get("sampling", {}).get("seed"),
+        max_workers=1,   # always 1 — sequential pipeline
+        skip_rejected=bool(phase_cfg.get("skip_rejected", False)),
+        sampling_fraction=float(sampling_cfg.get("fraction", 1.0)),
+        sampling_seed=sampling_cfg.get("seed"),
     )
 
-    # Persist minimal phase config snapshot for fingerprinting
     cfg_snapshot = {
-        "dataset_type": cfg.dataset_type,
-        "program_year": cfg.program_year,
-        "input_files": cfg.input_files,
-        "output_dir": cfg.output_dir,
-        "chunk_size": cfg.chunk_size,
-        "write_format": cfg.write_format,
-        "keep_source_file": cfg.keep_source_file,
-        "column_mapping": cfg.column_mapping,
+        "dataset_type":      cfg.dataset_type,
+        "program_year":      cfg.program_year,
+        "input_files":       cfg.input_files,
+        "output_dir":        cfg.output_dir,
+        "chunk_size":        cfg.chunk_size,
+        "write_format":      cfg.write_format,
+        "keep_source_file":  cfg.keep_source_file,
+        "column_mapping":    cfg.column_mapping,
         "sampling_fraction": cfg.sampling_fraction,
-        "sampling_seed": cfg.sampling_seed,
+        "sampling_seed":     cfg.sampling_seed,
+        "max_workers":       1,
     }
     cfg_path = out_dir / "config_from_pipeline.yaml"
     with open(cfg_path, "w", encoding="utf-8") as f:
@@ -1155,33 +485,36 @@ def run_from_pipeline(
     end_ts = datetime.now(timezone.utc).isoformat()
 
     return {
-        "phase": "phase1_clean",
-        "dataset": dataset_name,
+        "phase":    "phase1_clean",
+        "dataset":  dataset_name,
         "approach": approach,
-        "run_id": run_id,
+        "run_id":   run_id,
         "start_utc": start_ts,
-        "end_utc": end_ts,
+        "end_utc":   end_ts,
         "wall_time_seconds": round(wall, 4),
         "artifacts": {
-            "clean_dir": str(out_dir / "payments_clean"),
-            "rejected_dir": None if cfg.skip_rejected else str(out_dir / "payments_rejected"),
-            "clean_manifest": str(out_dir / "payments_clean_manifest.json"),
-            "rejected_manifest": None if cfg.skip_rejected else str(out_dir / "payments_rejected_manifest.json"),
-            "report": str(out_dir / "cleaning_report.json"),
-            "fingerprint": str(out_dir / "dataset_fingerprint.json"),
+            "clean_dir":          str(out_dir / "payments_clean"),
+            "rejected_dir":       None if cfg.skip_rejected else str(out_dir / "payments_rejected"),
+            "clean_manifest":     str(out_dir / "payments_clean_manifest.json"),
+            "rejected_manifest":  None if cfg.skip_rejected else str(out_dir / "payments_rejected_manifest.json"),
+            "report":             str(out_dir / "cleaning_report.json"),
+            "fingerprint":        str(out_dir / "dataset_fingerprint.json"),
         },
     }
 
 
+# ---------------------------------------------------------------------------
+# CLI entry-point
+# ---------------------------------------------------------------------------
+
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="Path to YAML config for Phase 1 cleaning.")
-    parser.add_argument("--log-level", default="INFO", help="Logging level (INFO, DEBUG, ...).")
+    parser = argparse.ArgumentParser(description="Phase 1 – CMS Open Payments cleaning (Sequential CPU)")
+    parser.add_argument("--config",    required=True, help="Path to YAML config for Phase 1 cleaning.")
+    parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
     setup_logging(args.log_level)
 
-    # Allow passing bare config names by resolving against ./configs
     config_path = Path(args.config)
     if not config_path.exists():
         fallback = Path(__file__).parent / "configs" / args.config
@@ -1196,3 +529,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+

@@ -1,19 +1,75 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="ALL" />
+  </component>
   <component name="ChangeListManager">
-    <list default="true" id="f725bebf-47a6-46cf-819c-59d24d69138e" name="Changes" comment="latest project version">
+    <list default="true" id="f725bebf-47a6-46cf-819c-59d24d69138e" name="Changes" comment="clean not needed functions">
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/01_clean_data.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/02_build_graph.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/03_graph_algorithms.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/04_fraud_scoring.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/README.md" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/config.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/configs/pipeline_general_2024.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/configs/pipeline_ownership_2024.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/configs/pipeline_research_2024.yaml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/normalizers.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/numba_kernels.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/run_pipeline.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/schema.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/concurrentNumba/transforms.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/sequentialCPU/config.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/sequentialCPU/fingerprint.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/sequentialCPU/normalizers.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/sequentialCPU/schema.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/sequentialCPU/transforms.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_general_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_ownership_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_research_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_research_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/01_clean_data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/02_build_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/02_build_graph.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/03_graph_algorithms.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/03_graph_algorithms.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/04_fraud_scoring.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/04_fraud_scoring.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/README.md" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_general_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_ownership_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/configs/pipeline_research_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/configs/pipeline_research_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentCPU/run_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/run_pipeline.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/01_clean_data_gpu.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/02_build_graph_gpu.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/03_graph_algorithms_gpu.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/04_fraud_scoring_gpu.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/configs/pipeline_general_2024.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/configs/pipeline_ownership_2024.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/configs/pipeline_research_2024.yaml" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/parallelGPU/run_pipeline.py" beforeDir="false" />
+      <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/01_clean_data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/04_fraud_scoring.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/04_fraud_scoring.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_general_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_ownership_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_ownership_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_research_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_research_2024.yaml" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/run_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/run_pipeline.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
     <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
     <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_D:/ParallelFraudDetection" value="38nVLBqnmJsqjY3Wt7yj75dXg5K" />
+    </persistenceIdMap>
+  </component>
+  <component name="CopilotUserSelectedChatMode">
+    <option name="chatModeId" value="Agent" />
+  </component>
+  <component name="CopilotUserSelectedModel">
+    <selectedModels>
+      <entry key="inline" value="GPT-4o" />
+      <entry key="edit-panel" value="GPT-5 mini" />
+      <entry key="chat-panel" value="GPT-4o" />
+      <entry key="agent-panel" value="GPT-4o" />
+    </selectedModels>
   </component>
   <component name="FileTemplateManagerImpl">
     <option name="RECENT_TEMPLATES">
@@ -59,19 +115,24 @@
     &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
     &quot;SHELLCHECK.PATH&quot;: &quot;I do mind&quot;,
     &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
     &quot;git-widget-placeholder&quot;: &quot;master&quot;,
-    &quot;last_opened_file_path&quot;: &quot;D:/ParallelFraudDetection/parallelGPU&quot;,
+    &quot;last_opened_file_path&quot;: &quot;D:/ParallelFraudDetection&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
     &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
-    &quot;settings.editor.selected.configurable&quot;: &quot;terminal&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
     &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
 }</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
+      <recent name="D:\ParallelFraudDetection" />
       <recent name="D:\ParallelFraudDetection\parallelGPU" />
       <recent name="D:\ParallelFraudDetection\concurentCPU" />
       <recent name="D:\ParallelFraudDetection\sequentialCPU" />
-      <recent name="D:\ParallelFraudDetection" />
       <recent name="D:\ParallelFraudDetection\documents" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
@@ -96,6 +157,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="true" />
       <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
       <option name="RUN_TOOL" value="" />
       <option name="SCRIPT_NAME" value="D:\ParallelFraudDetection\concurentCPU\01_clean_data.py" />
@@ -144,6 +206,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="true" />
       <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
       <option name="RUN_TOOL" value="" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/check_ownership.py" />
@@ -192,6 +255,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="true" />
       <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
       <option name="RUN_TOOL" value="" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/sequentialCPU/full_verification.py" />
@@ -240,6 +304,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="true" />
       <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
       <option name="RUN_TOOL" value="" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/sequentialCPU/test_setup.py" />
@@ -288,6 +353,7 @@
       <option name="IS_MODULE_SDK" value="true" />
       <option name="ADD_CONTENT_ROOTS" value="true" />
       <option name="ADD_SOURCE_ROOTS" value="true" />
+      <option name="DEBUG_JUST_MY_CODE" value="true" />
       <EXTENSION ID="PythonCoverageRunConfigurationExtension" runner="coverage.py" />
       <option name="RUN_TOOL" value="" />
       <option name="SCRIPT_NAME" value="$PROJECT_DIR$/sequentialCPU/verify_output.py" />
@@ -325,19 +391,19 @@
     </configuration>
     <recent_temporary>
       <list>
-        <item itemvalue="Python.01_clean_data" />
-        <item itemvalue="Python.check_ownership" />
         <item itemvalue="Python.verify_output" />
         <item itemvalue="Python.test_setup" />
         <item itemvalue="Python.full_verification" />
+        <item itemvalue="Python.check_ownership" />
+        <item itemvalue="Python.01_clean_data" />
       </list>
     </recent_temporary>
   </component>
   <component name="SharedIndexes">
     <attachedChunks>
       <set>
-        <option value="bundled-js-predefined-d6986cc7102b-9b0f141eb926-JavaScript-PY-253.29346.142" />
-        <option value="bundled-python-sdk-f2b7a9f6281b-6e1f45a539f7-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-253.29346.142" />
+        <option value="bundled-js-predefined-d6986cc7102b-31caf2ab9e3c-JavaScript-PY-261.23567.174" />
+        <option value="bundled-python-sdk-024ed6589d45-c2ffad84badb-com.jetbrains.pycharm.pro.sharedIndexes.bundled-PY-261.23567.174" />
       </set>
     </attachedChunks>
   </component>
@@ -363,7 +429,36 @@
       <workItem from="1769967747289" duration="9135000" />
       <workItem from="1769978178612" duration="2038000" />
       <workItem from="1770078818012" duration="825000" />
-      <workItem from="1770119837290" duration="758000" />
+      <workItem from="1770119837290" duration="995000" />
+      <workItem from="1770127911547" duration="604000" />
+      <workItem from="1770205879976" duration="164000" />
+      <workItem from="1770207483557" duration="4000" />
+      <workItem from="1770221909647" duration="948000" />
+      <workItem from="1770224725643" duration="946000" />
+      <workItem from="1770389871369" duration="11000" />
+      <workItem from="1771778929498" duration="4046000" />
+      <workItem from="1771797895524" duration="6580000" />
+      <workItem from="1771866863320" duration="10000" />
+      <workItem from="1771871850464" duration="230000" />
+      <workItem from="1772021223350" duration="17000" />
+      <workItem from="1772034466795" duration="2678000" />
+      <workItem from="1772042724238" duration="4857000" />
+      <workItem from="1772119210171" duration="425000" />
+      <workItem from="1772119686643" duration="2000" />
+      <workItem from="1772205891499" duration="88000" />
+      <workItem from="1772556390560" duration="55000" />
+      <workItem from="1772713051116" duration="3000" />
+      <workItem from="1772903459624" duration="11000" />
+      <workItem from="1772903766703" duration="10000" />
+      <workItem from="1773914595981" duration="78000" />
+      <workItem from="1773921043056" duration="20000" />
+      <workItem from="1774472707910" duration="3306000" />
+      <workItem from="1776340423771" duration="2582000" />
+      <workItem from="1776356664484" duration="8000" />
+      <workItem from="1778014544455" duration="6068000" />
+      <workItem from="1778071082435" duration="5000" />
+      <workItem from="1778401675109" duration="13367000" />
+      <workItem from="1778420719364" duration="22000" />
     </task>
     <task id="LOCAL-00001" summary="fixed sequentialCPU with fractional data work">
       <option name="closed" value="true" />
@@ -389,7 +484,15 @@
       <option name="project" value="LOCAL" />
       <updated>1770079444611</updated>
     </task>
-    <option name="localTasksCounter" value="4" />
+    <task id="LOCAL-00004" summary="clean not needed functions">
+      <option name="closed" value="true" />
+      <created>1770121085719</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1770121085719</updated>
+    </task>
+    <option name="localTasksCounter" value="5" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -398,7 +501,8 @@
   <component name="VcsManagerConfiguration">
     <MESSAGE value="fixed sequentialCPU with fractional data work" />
     <MESSAGE value="latest project version" />
-    <option name="LAST_COMMIT_MESSAGE" value="latest project version" />
+    <MESSAGE value="clean not needed functions" />
+    <option name="LAST_COMMIT_MESSAGE" value="clean not needed functions" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/ParallelFraudDetection$full_verification.coverage" NAME="full_verification Coverage Results" MODIFIED="1769441370455" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/sequentialCPU" />
