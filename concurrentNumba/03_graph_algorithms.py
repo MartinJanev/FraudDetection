@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """\
-Phase 3 (Concurrent CPU via Numba + NetworKit): Graph Algorithms
+Phase 3 (Concurrent CPU via Numba + optional NetworKit): Graph Algorithms
 
-Replaces Dask degree computation with Numba JIT-compiled parallel kernels running
-over numpy arrays, coordinated by ThreadPoolExecutor for file-level parallelism.
-NetworKit (OpenMP) is kept for PageRank + connected components (unchanged from
-the concurrent-Dask version).
+Computes degree features with Numba JIT-compiled kernels over numpy arrays,
+coordinated by ThreadPoolExecutor for file-level parallelism.
+NetworKit (OpenMP) is used when available for PageRank + connected components,
+with a NetworkX fallback so the pipeline can still run without a native build.
 
 Reads:   <graph_dir>/edges.parquet  (src, dst, w_total, n_payments)
 Writes:  degree.parquet, pagerank.parquet, components.parquet, algos_report.json
@@ -21,25 +21,26 @@ import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, cast
 
 import numpy as np
 import pandas as pd
+import networkx as nx
 import yaml
 
 try:
     import networkit as nk
-except Exception as e:
-    raise ImportError(
-        "NetworKit is required for this script. Install: pip install networkit"
-    ) from e
+    _HAS_NETWORKIT = True
+except Exception:
+    nk: Any = None
+    _HAS_NETWORKIT = False
 
 try:
     import numba
     from numba import njit, prange
     _HAS_NUMBA = True
 except ImportError:
-    numba = None   # type: ignore[assignment]
+    numba: Any = None
     njit = None    # type: ignore[assignment]
     prange = None  # type: ignore[assignment]
     _HAS_NUMBA = False
@@ -218,7 +219,7 @@ def compute_degrees_numba(edges: pd.DataFrame, *, use_numba: bool = True) -> pd.
     return deg
 
 
-def _nk_build_graph(edges: pd.DataFrame) -> Tuple["nk.graph.Graph", pd.Index]:
+def _nk_build_graph(edges: pd.DataFrame) -> Tuple[Any, pd.Index]:
     """Build a NetworKit directed weighted graph from (src, dst, w_total)."""
     nodes = pd.Index(
         pd.concat([edges["src"], edges["dst"]], ignore_index=True)
@@ -241,6 +242,25 @@ def _nk_build_graph(edges: pd.DataFrame) -> Tuple["nk.graph.Graph", pd.Index]:
     return g, nodes
 
 
+def _nx_build_graph(edges: pd.DataFrame) -> Tuple[Any, pd.Index]:
+    """Build a NetworkX directed weighted graph from (src, dst, w_total)."""
+    nodes = pd.Index(
+        pd.concat([edges["src"], edges["dst"]], ignore_index=True)
+        .astype(str)
+        .unique()
+    )
+
+    g = nx.DiGraph()
+    g.add_nodes_from(nodes.tolist())
+
+    for s, d, w in edges[["src", "dst", "w_total"]].itertuples(index=False, name=None):
+        if pd.isna(w):
+            continue
+        g.add_edge(str(s), str(d), weight=float(w))
+
+    return g, nodes
+
+
 def compute_pagerank(
     edges: pd.DataFrame,
     alpha: float,
@@ -249,37 +269,58 @@ def compute_pagerank(
     *,
     max_threads: int,
 ) -> pd.DataFrame:
-    if max_threads > 0:
+    if _HAS_NETWORKIT and max_threads > 0:
         nk.setNumberOfThreads(int(max_threads))
 
-    g, nodes = _nk_build_graph(edges)
-    pr = nk.centrality.PageRank(g, float(alpha), float(tol))
+    if _HAS_NETWORKIT:
+        g, nodes = _nk_build_graph(edges)
+        pr = nk.centrality.PageRank(g, float(alpha), float(tol))
 
-    if hasattr(pr, "setMaxIterations"):
-        pr.setMaxIterations(int(max_iter))
-    elif hasattr(pr, "maxIterations"):
-        try:
-            pr.maxIterations = int(max_iter)
-        except Exception:
-            pass
+        if hasattr(pr, "setMaxIterations"):
+            pr.setMaxIterations(int(max_iter))
+        elif hasattr(pr, "maxIterations"):
+            try:
+                pr.maxIterations = int(max_iter)
+            except Exception:
+                pass
 
-    pr.run()
-    return pd.DataFrame({"node_id": nodes.tolist(), "pagerank": pr.scores()})
+        pr.run()
+        scores = pr.scores()
+    else:
+        g, nodes = _nx_build_graph(edges)
+        scores_by_node = nx.pagerank(
+            g,
+            alpha=float(alpha),
+            tol=float(tol),
+            max_iter=int(max_iter),
+            weight="weight",
+        )
+        scores = [float(scores_by_node.get(node, 0.0)) for node in nodes.tolist()]
+
+    return pd.DataFrame({"node_id": nodes.tolist(), "pagerank": scores})
 
 
 def compute_components(edges: pd.DataFrame, *, max_threads: int) -> pd.DataFrame:
-    if max_threads > 0:
+    if _HAS_NETWORKIT and max_threads > 0:
         nk.setNumberOfThreads(int(max_threads))
 
-    g, nodes = _nk_build_graph(edges)
-    ug = nk.graphtools.toUndirected(g)
-    cc = nk.components.ConnectedComponents(ug)
-    cc.run()
-
     rows = []
-    for cid, members in enumerate(cc.getComponents()):
-        for u in members:
-            rows.append((nodes[int(u)], cid))
+    if _HAS_NETWORKIT:
+        g, nodes = _nk_build_graph(edges)
+        ug = nk.graphtools.toUndirected(g)
+        cc = nk.components.ConnectedComponents(ug)
+        cc.run()
+        node_labels = [str(n) for n in nodes.tolist()]
+
+        for cid, members in enumerate(cc.getComponents()):
+            for u in sorted(members):
+                rows.append((cast(str, node_labels[int(u)]), cid))
+    else:
+        g, nodes = _nx_build_graph(edges)
+        node_order = {node: i for i, node in enumerate(nodes.tolist())}
+        for cid, members in enumerate(nx.connected_components(g.to_undirected())):
+            for node in sorted(members, key=lambda n: node_order.get(n, 0)):
+                rows.append((node, cid))
 
     return pd.DataFrame(rows, columns=["node_id", "component_id"])
 
@@ -298,15 +339,17 @@ def _maybe_set_threads(max_threads: int) -> None:
 def run(cfg: AlgoConfig) -> None:
     t0 = time.perf_counter()
 
-    if cfg.max_threads > 0:
+    if _HAS_NETWORKIT and cfg.max_threads > 0:
         nk.setNumberOfThreads(int(cfg.max_threads))
-        _maybe_set_threads(int(cfg.max_threads))
+    _maybe_set_threads(int(cfg.max_threads))
 
     edges_path = _edges_path(cfg.graph_dir)
     print(f"[phase3_algos] graph_dir={cfg.graph_dir} | edges={edges_path}", flush=True)
-    if cfg.max_threads and cfg.max_threads > 0:
+    if _HAS_NETWORKIT and cfg.max_threads and cfg.max_threads > 0:
         nk.setNumberOfThreads(cfg.max_threads)
         print(f"[phase3_algos] NetworKit threads={nk.getMaxNumberOfThreads()}", flush=True)
+    elif not _HAS_NETWORKIT:
+        print("[phase3_algos] NetworKit unavailable; using NetworkX fallback for PageRank/components", flush=True)
 
     # Warm up Numba JIT
     if cfg.use_numba and _HAS_NUMBA:
@@ -326,7 +369,7 @@ def run(cfg: AlgoConfig) -> None:
 
     src_series = edges_pd["src"].astype(str)
     dst_series = edges_pd["dst"].astype(str)
-    n_nodes = int(pd.concat([src_series, dst_series], ignore_index=True).nunique())
+    n_nodes = int(len(set(src_series.tolist()) | set(dst_series.tolist())))
 
     # --- Degree features (Numba parallel kernels) ---
     t_deg_start = time.perf_counter()
@@ -335,7 +378,7 @@ def run(cfg: AlgoConfig) -> None:
     t_deg = time.perf_counter() - t_deg_start
     print(f"[phase3_algos] degree rows={len(degrees)}", flush=True)
 
-    # --- PageRank (NetworKit / OpenMP) ---
+    # --- PageRank (NetworKit / OpenMP or NetworkX fallback) ---
     t_pr_start = time.perf_counter()
     pagerank_df = compute_pagerank(
         edges_pd,
@@ -346,7 +389,7 @@ def run(cfg: AlgoConfig) -> None:
     )
     t_pr = time.perf_counter() - t_pr_start
 
-    # --- Connected components (NetworKit / OpenMP) ---
+    # --- Connected components (NetworKit / OpenMP or NetworkX fallback) ---
     comp_df = None
     t_comp = None
     if cfg.compute_components:
@@ -397,8 +440,9 @@ def run(cfg: AlgoConfig) -> None:
             "has_numba": bool(_HAS_NUMBA),
         },
         "runtime": {
-            "backend_used": "networkit+numba",
+            "backend_used": "networkit+numba" if _HAS_NETWORKIT else "networkx+numba",
             "degrees_backend_used": "numba" if (cfg.use_numba and _HAS_NUMBA) else "numpy",
+            "graph_backend_used": "networkit" if _HAS_NETWORKIT else "networkx",
             "has_numba": bool(_HAS_NUMBA),
         },
     }

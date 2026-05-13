@@ -9,7 +9,6 @@ A reproducible four-phase pipeline for CMS Open Payments data with a sequential 
 
 ## Status
 - Phases 1–4 complete on sequential CPU (`sequentialCPU/`).
-- Parallel CPU and GPU implementations are under active development.
 
 ## Requirements
 - Python 3.11+
@@ -29,24 +28,28 @@ pip install -r requirements.txt
 
 ## Quickstart (sequential CPU example)
 ```bash
-cd sequentialCPU
+# Run the full sequential pipeline (module execution)
+python -m sequentialCPU.run_pipeline --config sequentialCPU/configs/pipeline_general_2024.yaml --runs 1
 
-# Phase 1: Clean data
-python 01_clean_data.py --config configs/config_general.yaml
-
-# Phase 2: Build graph
-python 02_build_graph.py --config configs/graph_general_2024.yaml
-
-# Phase 3: Run graph algorithms
-python 03_graph_algorithms.py --config configs/algos_general_2024.yaml
-
-# Phase 4: Score fraud risk
-python 04_fraud_scoring.py --config configs/score_general_2024.yaml
-
-# Optional: view top scores
-python -c "import pandas as pd; df = pd.read_parquet('../output_cpu/graphs/general_2024_bipartite/scoring/topk_risk_scores.parquet'); print(df[['node_id','node_type','risk_score','rank','in_weight','in_degree']].head(10))"
+# Run the full concurrent Numba pipeline (module execution)
+python -m concurrentNumba.run_pipeline --config concurrentNumba/configs/pipeline_general_2024.yaml --max-workers 4 --runs 1
 ```
-For research and ownership datasets, swap the config files (`config_research.yaml`, `config_ownership.yaml`, etc.).
+
+For research and ownership datasets, swap the config files:
+- sequential: `sequentialCPU/configs/pipeline_research_2024.yaml`, `sequentialCPU/configs/pipeline_ownership_2024.yaml`
+- concurrent: `concurrentNumba/configs/pipeline_research_2024.yaml`, `concurrentNumba/configs/pipeline_ownership_2024.yaml`
+
+To run a single phase directly (module execution), e.g. Phase 1:
+```bash
+python -m sequentialCPU.01_clean_data --config sequentialCPU/configs/pipeline_general_2024.yaml
+python -m concurrentNumba.01_clean_data --config concurrentNumba/configs/pipeline_general_2024.yaml
+```
+
+If you need to run the file path directly instead of `-m`, set `PYTHONPATH=.`:
+```bash
+PYTHONPATH=. python sequentialCPU/run_pipeline.py --config sequentialCPU/configs/pipeline_general_2024.yaml --runs 1
+PYTHONPATH=. python concurrentNumba/run_pipeline.py --config concurrentNumba/configs/pipeline_general_2024.yaml --max-workers 4 --runs 1
+```
 
 ## Outputs (CPU baseline)
 - Cleaned data: `output/<dataset>/payments_clean/` plus `payments_rejected/` and `cleaning_report.json`.
@@ -58,11 +61,11 @@ For research and ownership datasets, swap the config files (`config_research.yam
 ```
 CMS_Open_Payements2024/   # Raw CMS CSVs
 sequentialCPU/            # Sequential CPU pipeline (phases 1–4)
-concurrentCPU/            # Parallel CPU pipeline (Dask-based)
-parallelGPU/              # GPU pipeline (in progress)
-output/                   # Cleaned data outputs
+concurrentNumba/          # Concurrent Numba CPU pipeline (phases 1–4)
+output/                   # Pipeline outputs
 requirements.txt          # Python dependencies
 README.md                 # This file
+tools/                    # Utility scripts (e.g., synthetic data expander)
 ```
 
 ## Roadmap
@@ -75,7 +78,4 @@ README.md                 # This file
 - CMS Data Dictionary: https://www.cms.gov/OpenPayments/Downloads/OpenPaymentsDataDictionary.pdf
 - NetworkX: https://networkx.org/
 
-For per-phase details, see `sequentialCPU/README.md` and the scripts in each pipeline directory.
-
 ---
-**Last Updated:** January 30, 2026

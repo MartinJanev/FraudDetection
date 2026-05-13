@@ -23,8 +23,8 @@ from typing import Dict, List
 
 import yaml
 
-from normalizers import NORMALIZATION_VERSION, NORMALIZATION_DESCRIPTION, HASH_FUNCTION, FINGERPRINT_MB  # type: ignore[import]
-from config import CleanConfig  # type: ignore[import]
+from .normalizers import NORMALIZATION_VERSION, NORMALIZATION_DESCRIPTION, HASH_FUNCTION, FINGERPRINT_MB
+from .config import CleanConfig
 
 
 # ---------------------------------------------------------------------------

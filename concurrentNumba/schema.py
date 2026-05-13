@@ -21,16 +21,13 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-import sys
-from pathlib import Path as _Path
-_HERE = _Path(__file__).parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-
 import numpy as np
 import pandas as pd
 
-from config import CleanConfig  # type: ignore[import]
+from .config import CleanConfig
+
+# String dtype used in canonical metadata tables.
+STRING_DTYPE = "string[python]"
 
 # ---------------------------------------------------------------------------
 # Canonical output schema
@@ -158,7 +155,7 @@ def make_canonical_meta(_: CleanConfig) -> pd.DataFrame:
 
     Used as the fallback output when no records survive cleaning.
     """
-    S = "string[python]"
+    S = STRING_DTYPE
     dtypes = {
         "record_id":     S,
         "program_year":  "Int16",

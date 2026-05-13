@@ -6,8 +6,4 @@ tqdm
 networkx
 scipy
 matplotlib
-
-dask[dataframe,distributed]
-networkit
-
 numba

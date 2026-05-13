@@ -47,7 +47,7 @@ class ScoreConfig:
 
     output_dir: Optional[str] = None
     top_k: int = 200
-    score_node_types: List[str] = None
+    score_node_types: Optional[List[str]] = None
     method: str = "robust_z_logsum"
     eps: float = 1e-9
     w_in_w: float = 0.55
@@ -174,7 +174,11 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
     if missing:
         raise KeyError(f"degree.parquet missing columns: {missing}. Available: {df.columns.tolist()}")
 
-    df = df[df["node_type"].isin(cfg.score_node_types)].copy()
+    score_types = cfg.score_node_types if cfg.score_node_types is not None else [
+        "physician",
+        "teaching_hospital",
+    ]
+    df = df[df["node_type"].isin(score_types)].copy()
 
     df = df[df["in_w"].fillna(0.0) >= cfg.min_in_w]
     df = df[df["in_deg"].fillna(0).astype(int) >= cfg.min_in_deg]

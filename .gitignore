@@ -38,17 +38,16 @@ env/
 Thumbs.db
 
 # Project specific
+old/
+tools/
 output/
-output_cpu/
 CMS_Open_Payements2024/
 printAllFiles.sh
 all_contents.txt
 a_doc/
 *.parquet
 *.csv.gz
-CMS_Open_Payements2024/*.csv
-CMS_Open_Payements2024/*.txt
-CMS_Open_Payements2024/*.zip
+
 
 # Keep directory structure but ignore data
 !.gitkeep

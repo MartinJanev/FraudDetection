@@ -1,25 +1,26 @@
 # concurrentNumba – Fraud Detection Pipeline (Numba + ThreadPoolExecutor)
 
-Parallel CPU implementation that replaces **Dask** with **Numba JIT-compiled kernels**
+Parallel CPU pipeline built around **Numba JIT-compiled kernels**
 and Python's `concurrent.futures.ThreadPoolExecutor` for chunk/file-level parallelism.
 
 ## Architecture
 
-| Phase | Parallelism mechanism | Key change vs. concurrentCPU |
-|-------|----------------------|-------------------------------|
-| **Phase 1** – Clean | `ThreadPoolExecutor` over CSV chunks; Numba `@njit` for sampling hash + amount validation | Replaces `dask.dataframe.read_csv` / `map_partitions` |
-| **Phase 2** – Build Graph | `ThreadPoolExecutor` over parquet files; Numba JIT for edge weight/count accumulation | Replaces `dask.dataframe.groupby` |
-| **Phase 3** – Graph Algorithms | Numba `@njit(parallel=True)` kernels for degree computation; NetworKit (OpenMP) kept for PageRank + components | Replaces Dask `degrees_backend` |
-| **Phase 4** – Fraud Scoring | Numba `@njit(parallel=True)` for robust Z-score + weighted sum kernels; pure pandas I/O | Removes stray `dask` import |
+| Phase | Parallelism mechanism | Summary |
+|-------|----------------------|---------|
+| **Phase 1** – Clean | `ThreadPoolExecutor` over CSV chunks; Numba `@njit` for sampling hash + amount validation | Chunk-level cleaning with deterministic filtering |
+| **Phase 2** – Build Graph | `ThreadPoolExecutor` over parquet files; Numba JIT for edge weight/count accumulation | File-level graph aggregation |
+| **Phase 3** – Graph Algorithms | Numba `@njit(parallel=True)` kernels for degree computation; NetworKit fast path for PageRank + components with a NetworkX fallback | Fast degree features and optional native graph algorithms |
+| **Phase 4** – Fraud Scoring | Numba `@njit(parallel=True)` for robust Z-score + weighted sum kernels; pure pandas I/O | Deterministic scoring and ranking |
 
 ## Dependencies
 
 ```
-pip install numba numpy pandas pyarrow pyyaml networkit tqdm
+pip install numba numpy pandas pyarrow pyyaml networkx tqdm
 ```
 
 > **Note:** Numba requires a compatible LLVM toolchain. On Windows, install via `conda install numba` or ensure LLVM/VS build tools are present.
 > If Numba is unavailable the code falls back gracefully to pure-NumPy equivalents.
+> NetworKit is now optional; install it separately if you want the OpenMP-accelerated PageRank/components backend.
 
 ## Usage
 

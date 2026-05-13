@@ -29,19 +29,13 @@ import hashlib
 import logging
 from typing import Dict, List, Optional
 
-import sys
-from pathlib import Path as _Path
-_HERE = _Path(__file__).parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-
 import numpy as np
 import pandas as pd
 
-from config import CleanConfig          # type: ignore[import]
-from normalizers import normalize_name, normalize_zip5, safe_float, parse_date, stable_hash_hex  # type: ignore[import]
-from numba_kernels import _fast_hash_mask, _parse_amounts_kernel, _HAS_NUMBA  # type: ignore[import]
-from schema import CANONICAL_COLS, get_column_mapping  # type: ignore[import]
+from .config import CleanConfig
+from .normalizers import normalize_name, normalize_zip5, safe_float, parse_date, stable_hash_hex
+from .numba_kernels import _fast_hash_mask, _parse_amounts_kernel, _HAS_NUMBA
+from .schema import CANONICAL_COLS, get_column_mapping
 
 
 # ---------------------------------------------------------------------------
@@ -254,6 +248,56 @@ def build_payee_fields_vectorized(
     }
 
 
+def _build_record_id_series(
+    program_year: int,
+    dataset_type: str,
+    payer_norm: pd.Series,
+    payee_key: pd.Series,
+    amount: pd.Series,
+    payment_date: pd.Series,
+    nature: pd.Series,
+) -> pd.Series:
+    """Vectorised record-ID from concatenated key fields."""
+    sep = "|"
+    key = (
+        str(program_year) + sep + dataset_type + sep
+        + payer_norm.fillna("").astype(str) + sep
+        + payee_key.fillna("").astype(str) + sep
+        + amount.where(amount.notna(), "").astype(str) + sep
+        + payment_date.fillna("").astype(str) + sep
+        + nature.where(nature.notna(), "").astype(str)
+    )
+    return key.map(lambda s: hashlib.sha1(s.encode("utf-8")).hexdigest()).astype("string[python]")
+
+
+def _compute_validity_flags(
+    amount: pd.Series,
+    payer_norm: pd.Series,
+    payee_key: pd.Series,
+) -> tuple[pd.Series, pd.Series]:
+    """Return (is_valid, drop_reason) based on core required fields."""
+    is_valid = (
+        amount.notna()
+        & (amount >= 0)
+        & payer_norm.notna()
+        & (payer_norm.astype(str).str.len() > 0)
+        & payee_key.notna()
+        & (payee_key.astype(str).str.len() > 0)
+    )
+
+    drop_reason = pd.Series([None] * len(amount), dtype="string", index=amount.index)
+    drop_reason = drop_reason.mask(amount.isna(), "missing_amount")
+    drop_reason = drop_reason.mask(amount.notna() & (amount < 0), "negative_amount")
+    drop_reason = drop_reason.mask(
+        payer_norm.isna() | (payer_norm.astype(str).str.len() == 0), "missing_payer"
+    )
+    drop_reason = drop_reason.mask(
+        payee_key.isna() | (payee_key.astype(str).str.len() == 0), "missing_payee"
+    )
+    drop_reason = drop_reason.where(~is_valid, drop_reason)
+    return is_valid, drop_reason
+
+
 # ---------------------------------------------------------------------------
 # Full partition → canonical schema transformation
 # ---------------------------------------------------------------------------
@@ -294,11 +338,11 @@ def canonicalize_partition(
     if not payer_name_col or not amount_col:
         raise ValueError("Required payer_name/amount column mapping missing")
 
-    payer_raw  = df[payer_name_col].astype("object")
+    payer_raw = df[payer_name_col].astype("object")
     payer_norm = payer_raw.map(normalize_name)
 
     amount_raw = df[amount_col]
-    amount     = amount_raw.map(safe_float).astype("float64")
+    amount = amount_raw.map(safe_float).astype("float64")
 
     # Numba kernel for validity check (also serves as JIT warm-up)
     if cfg.use_numba and _HAS_NUMBA and len(amount):
@@ -349,42 +393,19 @@ def canonicalize_partition(
 
     payment_quarter = payment_date.map(_quarter)
 
-    is_valid = (
-        amount.notna()
-        & (amount >= 0)
-        & payer_norm.notna()
-        & (payer_norm.astype(str).str.len() > 0)
-        & payee_fields["payee_key"].notna()
-        & (payee_fields["payee_key"].astype(str).str.len() > 0)
+    is_valid, drop_reason = _compute_validity_flags(
+        amount, payer_norm, payee_fields["payee_key"]
     )
-
-    drop_reason = pd.Series([None] * len(df), dtype="string", index=df.index)
-    drop_reason = drop_reason.mask(amount.isna(), "missing_amount")
-    drop_reason = drop_reason.mask(amount.notna() & (amount < 0), "negative_amount")
-    drop_reason = drop_reason.mask(
-        payer_norm.isna() | (payer_norm.astype(str).str.len() == 0), "missing_payer"
-    )
-    drop_reason = drop_reason.mask(
-        payee_fields["payee_key"].isna() | (payee_fields["payee_key"].astype(str).str.len() == 0),
-        "missing_payee",
-    )
-    drop_reason = drop_reason.where(~is_valid, drop_reason)
 
     # SHA-1 record_id (deterministic, includes key fields)
-    hash_inputs: List[List[Optional[str]]] = [
-        [
-            str(cfg.program_year),
-            cfg.dataset_type,
-            payer_norm.iloc[i],
-            payee_fields["payee_key"].iloc[i],
-            str(amount.iloc[i]) if pd.notna(amount.iloc[i]) else None,
-            payment_date.iloc[i],
-            str(nature.iloc[i]) if pd.notna(nature.iloc[i]) else None,
-        ]
-        for i in range(len(payer_norm))
-    ]
-    record_id = pd.Series(
-        [stable_hash_hex(h) for h in hash_inputs], index=df.index, dtype="string"
+    record_id = _build_record_id_series(
+        cfg.program_year,
+        cfg.dataset_type,
+        payer_norm,
+        payee_fields["payee_key"],
+        amount,
+        payment_date,
+        nature,
     )
 
     out = pd.DataFrame(

@@ -68,13 +68,15 @@ def load_phase_module(filename: str, module_name: str):
     spec.loader.exec_module(module)
     return module
 
-
-PHASE_MODULES = {
-    "clean": load_phase_module(PHASE_FILES["clean"], "phase1_clean"),
-    "graph": load_phase_module(PHASE_FILES["graph"], "phase2_graph"),
-    "algos": load_phase_module(PHASE_FILES["algos"], "phase3_algos"),
-    "score": load_phase_module(PHASE_FILES["score"], "phase4_score"),
-}
+def _load_phase_modules() -> Dict[str, object]:
+    """Deferred phase module loading (avoids import-time side effects)."""
+    package = __package__ or "sequentialCPU"
+    return {
+        "clean": load_phase_module(PHASE_FILES["clean"], f"{package}.phase1_clean"),
+        "graph": load_phase_module(PHASE_FILES["graph"], f"{package}.phase2_graph"),
+        "algos": load_phase_module(PHASE_FILES["algos"], f"{package}.phase3_algos"),
+        "score": load_phase_module(PHASE_FILES["score"], f"{package}.phase4_score"),
+    }
 
 
 def unique_run_id() -> str:
@@ -160,6 +162,7 @@ def run_once(
     out_root: Path,
     dataset_name: str,
     phases_to_run: List[str],
+    phase_modules: Dict[str, object],
     run_dir_override: Path | None = None,
 ) -> Dict:
     run_dir = Path(run_dir_override) if run_dir_override else out_root / unique_run_id()
@@ -188,7 +191,7 @@ def run_once(
     clean_res = None
     if "phase1_clean" in phases_to_run:
         t0 = time.perf_counter()
-        clean_res = PHASE_MODULES["clean"].run_from_pipeline(
+        clean_res = phase_modules["clean"].run_from_pipeline(
             pipeline_cfg,
             out_dir=phase_dirs["phase1_clean"],
             approach=approach,
@@ -214,14 +217,14 @@ def run_once(
         clean_manifest = None
 
 
-    # Diplay to terminal that phase 1 is complete
+    # Display to terminal that phase 1 is complete
     print(f"Phase 1 complete. Cleaned data at: {clean_res['artifacts']['clean_dir']}")
 
     # Phase 2: graph build
     graph_res = None
     if "phase2_graph" in phases_to_run:
         t0 = time.perf_counter()
-        graph_res = PHASE_MODULES["graph"].run_from_pipeline(
+        graph_res = phase_modules["graph"].run_from_pipeline(
             pipeline_cfg,
             clean_dir=Path(clean_res["artifacts"]["clean_dir"]),
             clean_manifest=clean_manifest,
@@ -242,14 +245,14 @@ def run_once(
             "end_utc": None,
         }
 
-    # Diplay to terminal that phase 2 is complete
+    # Display to terminal that phase 2 is complete
     print(f"Phase 2 complete. Graph edges at: {graph_res['artifacts']['edges']}")
 
     # Phase 3: algorithms
     alg_res = None
     if "phase3_algos" in phases_to_run:
         t0 = time.perf_counter()
-        alg_res = PHASE_MODULES["algos"].run_from_pipeline(
+        alg_res = phase_modules["algos"].run_from_pipeline(
             pipeline_cfg,
             graph_input_dir=Path(graph_res["artifacts"]["edges"]).parent,
             out_dir=phase_dirs["phase3_algos"],
@@ -269,7 +272,7 @@ def run_once(
             "end_utc": None,
         }
 
-    # Diplay to terminal that phase 3 is complete
+    # Display to terminal that phase 3 is complete
     print(f"Phase 3 complete. Algorithm outputs at: {phase_dirs['phase3_algos']}")
 
 
@@ -277,7 +280,7 @@ def run_once(
     score_res = None
     if "phase4_score" in phases_to_run:
         t0 = time.perf_counter()
-        score_res = PHASE_MODULES["score"].run_from_pipeline(
+        score_res = phase_modules["score"].run_from_pipeline(
             pipeline_cfg,
             graph_algos_dir=phase_dirs["phase3_algos"],
             out_dir=phase_dirs["phase4_score"],
@@ -366,6 +369,8 @@ def main() -> None:
 
     reuse_dir = Path(args.reuse_run_dir) if args.reuse_run_dir else None
 
+    phase_modules = _load_phase_modules()
+
     run_records = []
     for _ in tqdm(range(runs), desc="Pipeline runs", unit="run"):
         res = run_once(
@@ -375,6 +380,7 @@ def main() -> None:
             dataset_name=dataset_name,
             phases_to_run=phases_to_run,
             run_dir_override=reuse_dir,
+            phase_modules=phase_modules,
         )
         t = res.get("timings", {})
         row = {

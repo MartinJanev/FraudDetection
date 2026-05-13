@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """
-Phase 2 (Concurrent CPU via Numba + ThreadPoolExecutor): Graph Building
+Phase 2 (Concurrent CPU via Numba + ThreadPoolExecutor): Graph Building.
 
-Reads canonical cleaned payments Parquet dataset (Phase 1) and builds a bipartite directed graph.
-
-Replaces Dask with:
-  - pandas for Parquet I/O (per-file parallelism)
-  - concurrent.futures.ThreadPoolExecutor for parallel per-file edge construction
-  - Numba JIT-compiled kernels for hot aggregation inner loops
+Reads the cleaned payments Parquet dataset from Phase 1 and builds a bipartite directed graph.
+Uses pandas for Parquet I/O, ThreadPoolExecutor for per-file work, and Numba kernels for hot
+aggregation loops.
 
 Aggregates edges by (src, dst):
 - w_total    = sum(amount_usd)
@@ -48,8 +45,7 @@ except ImportError:
     _HAS_NUMBA = False
 
 # ---------------------------------------------------------------------------
-# Numba kernel: parallel weight accumulation per-edge bucket
-# (Used as acceleration inside _aggregate_edge_chunk for the numeric sum)
+# Numba kernels for edge aggregation
 # ---------------------------------------------------------------------------
 
 if _HAS_NUMBA:

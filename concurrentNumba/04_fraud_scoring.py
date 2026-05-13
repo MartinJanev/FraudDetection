@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Phase 4 (Numba CPU): Fraud Scoring / Risk Ranking (Deterministic)
+Phase 4 (Numba CPU): Fraud Scoring / Risk Ranking (Deterministic).
 
 Consumes graph algorithm outputs (Phase 3):
 - degree.parquet (node_id, in_weight/in_degree/out_weight/out_degree)
@@ -8,7 +8,7 @@ Optionally:
 - pagerank.parquet (node_id, pagerank)
 - nodes.parquet (node_id, node_type)
 
-Replaces the Dask import in the original with pure pandas + Numba-JIT scoring kernels.
+Uses pure pandas I/O plus Numba-JIT scoring kernels.
 
 Produces:
 - risk_scores.parquet
@@ -32,79 +32,19 @@ import pandas as pd
 import yaml
 
 try:
-    import numba
-    from numba import njit, prange
-    _HAS_NUMBA = True
+    from .numba_kernels import (
+        _HAS_NUMBA,
+        robust_z_kernel,
+        weighted_sum_scores,
+        warmup_all_kernels,
+    )
 except ImportError:
-    numba = None   # type: ignore[assignment]
-    njit = None    # type: ignore[assignment]
-    prange = None  # type: ignore[assignment]
-    _HAS_NUMBA = False
-
-# ---------------------------------------------------------------------------
-# Numba scoring kernels
-# ---------------------------------------------------------------------------
-
-if _HAS_NUMBA:
-    @njit(parallel=True, cache=True)
-    def _robust_z_numba(x: np.ndarray, eps: float) -> np.ndarray:
-        """Parallel robust Z-score: 0.6745 * (x - median) / (MAD + eps)."""
-        n = x.shape[0]
-        tmp = np.empty(n, dtype=np.float64)
-        for i in range(n):
-            tmp[i] = x[i]
-        tmp.sort()
-        mid = n // 2
-        if n % 2 == 0:
-            med = (tmp[mid - 1] + tmp[mid]) * 0.5
-        else:
-            med = tmp[mid]
-        dev = np.empty(n, dtype=np.float64)
-        for i in prange(n):
-            v = x[i] - med
-            dev[i] = v if v >= 0.0 else -v
-        dev_sorted = np.sort(dev)
-        if n % 2 == 0:
-            mad = (dev_sorted[mid - 1] + dev_sorted[mid]) * 0.5
-        else:
-            mad = dev_sorted[mid]
-        denom = mad + eps
-        out = np.empty(n, dtype=np.float64)
-        for i in prange(n):
-            out[i] = 0.6745 * (x[i] - med) / denom
-        return out
-
-    @njit(parallel=True, cache=True)
-    def _weighted_sum_scores(
-        z_in_w: np.ndarray,
-        z_in_deg: np.ndarray,
-        z_out_w: np.ndarray,
-        z_out_deg: np.ndarray,
-        w_in_w: float,
-        w_in_deg: float,
-        w_out_w: float,
-        w_out_deg: float,
-    ) -> np.ndarray:
-        """Compute weighted risk score in parallel."""
-        n = z_in_w.shape[0]
-        out = np.empty(n, dtype=np.float64)
-        for i in prange(n):
-            out[i] = (
-                w_in_w * z_in_w[i]
-                + w_in_deg * z_in_deg[i]
-                + w_out_w * z_out_w[i]
-                + w_out_deg * z_out_deg[i]
-            )
-        return out
-
-else:
-    def _robust_z_numba(x, eps):
-        med = np.median(x)
-        mad = np.median(np.abs(x - med)) + eps
-        return 0.6745 * (x - med) / mad
-
-    def _weighted_sum_scores(z_in_w, z_in_deg, z_out_w, z_out_deg, w_in_w, w_in_deg, w_out_w, w_out_deg):
-        return w_in_w * z_in_w + w_in_deg * z_in_deg + w_out_w * z_out_w + w_out_deg * z_out_deg
+    from numba_kernels import (  # type: ignore[import]
+        _HAS_NUMBA,
+        robust_z_kernel,
+        weighted_sum_scores,
+        warmup_all_kernels,
+    )
 
 
 def setup_logging(level: str = "INFO") -> None:
@@ -126,7 +66,7 @@ class ScoreConfig:
     output_dir: Optional[str] = None
     top_k: int = 200
 
-    score_node_types: List[str] = None
+    score_node_types: Optional[List[str]] = None
 
     method: str = "robust_z_logsum"
     eps: float = 1e-9
@@ -338,11 +278,11 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
     # Use Numba kernel for robust Z + weighted sum
     use_nb = cfg.use_numba and _HAS_NUMBA
     if use_nb:
-        z_in_w = _robust_z_numba(f_in_w, cfg.eps)
-        z_in_deg = _robust_z_numba(f_in_deg, cfg.eps)
-        z_out_w = _robust_z_numba(f_out_w, cfg.eps)
-        z_out_deg = _robust_z_numba(f_out_deg, cfg.eps)
-        risk = _weighted_sum_scores(
+        z_in_w = robust_z_kernel(f_in_w, cfg.eps)
+        z_in_deg = robust_z_kernel(f_in_deg, cfg.eps)
+        z_out_w = robust_z_kernel(f_out_w, cfg.eps)
+        z_out_deg = robust_z_kernel(f_out_deg, cfg.eps)
+        risk = weighted_sum_scores(
             z_in_w, z_in_deg, z_out_w, z_out_deg,
             cfg.w_in_w, cfg.w_in_deg, cfg.w_out_w, cfg.w_out_deg,
         )
@@ -362,7 +302,7 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
     if cfg.use_pagerank and cfg.w_pagerank != 0.0:
         pr = pd.to_numeric(df["pagerank"], errors="coerce").fillna(0.0).to_numpy()
         f_pr = np.log1p(pr)
-        z_pr = _robust_z_numba(f_pr, cfg.eps) if use_nb else robust_z(f_pr, eps=cfg.eps)
+        z_pr = robust_z_kernel(f_pr, cfg.eps) if use_nb else robust_z(f_pr, eps=cfg.eps)
         risk = risk + cfg.w_pagerank * z_pr
         df["pagerank"] = pr
         df["z_pagerank"] = z_pr
@@ -371,7 +311,7 @@ def score_table(df: pd.DataFrame, cfg: ScoreConfig) -> Tuple[pd.DataFrame, Dict[
     if cfg.use_components and cfg.w_component != 0.0:
         c_size = pd.to_numeric(df["comp_size"], errors="coerce").fillna(1.0).to_numpy()
         f_comp = np.log1p(1.0 / np.maximum(c_size, 1.0))
-        z_comp = _robust_z_numba(f_comp, cfg.eps) if use_nb else robust_z(f_comp, eps=cfg.eps)
+        z_comp = robust_z_kernel(f_comp, cfg.eps) if use_nb else robust_z(f_comp, eps=cfg.eps)
         risk = risk + cfg.w_component * z_comp
         df["z_comp_size"] = z_comp
 
@@ -414,20 +354,13 @@ def run(cfg: ScoreConfig) -> None:
         flush=True,
     )
 
-    # Warm up Numba
-    if cfg.use_numba and _HAS_NUMBA:
-        _dummy = np.array([1.0, 2.0, 3.0, 4.0, 5.0], dtype=np.float64)
-        _robust_z_numba(_dummy, 1e-9)
-        _weighted_sum_scores(_dummy, _dummy, _dummy, _dummy, 0.55, 0.25, 0.10, 0.10)
-        logging.info("[Phase 4] Numba JIT warm-up complete")
-
     degree_path = Path(cfg.degree_path) if cfg.degree_path else Path(cfg.graph_dir) / "degree.parquet"
     if not degree_path.exists():
         raise FileNotFoundError(f"Degree file not found: {degree_path}")
 
-    t_read0 = time.perf_counter()
+    t_read_start = time.perf_counter()
     df = pd.read_parquet(degree_path)
-    t_read = time.perf_counter() - t_read0
+    t_read = time.perf_counter() - t_read_start
     print(f"[phase4_score] loaded degree rows={len(df)}", flush=True)
 
     df = _normalize_degree_columns(df)
@@ -553,6 +486,8 @@ def main() -> None:
 
     setup_logging(args.log_level)
     cfg = load_config(str(config_path))
+    if cfg.use_numba and _HAS_NUMBA:
+        warmup_all_kernels()
     run(cfg)
 
 

@@ -6,7 +6,7 @@ Chains phases 1–4 in-process.
 Parallel execution lives *inside* each phase:
   - Phase 1: ThreadPoolExecutor over CSV chunks + Numba JIT kernels
   - Phase 2: ThreadPoolExecutor over parquet files + Numba aggregation kernels
-  - Phase 3: Numba JIT degree kernels + NetworKit (OpenMP) for PageRank/components
+  - Phase 3: Numba JIT degree kernels + optional NetworKit (OpenMP) for PageRank/components, with a NetworkX fallback
   - Phase 4: Numba JIT scoring kernels
 """
 
@@ -15,6 +15,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import logging
 import secrets
 import sys
 import time
@@ -35,27 +36,33 @@ PHASE_FILES = {
     "score": "04_fraud_scoring.py",
 }
 
+try:
+    from .numba_kernels import _HAS_NUMBA, warmup_all_kernels
+except ImportError:
+    from numba_kernels import _HAS_NUMBA, warmup_all_kernels  # type: ignore[import]
+
 
 def load_phase_module(filename: str, module_name: str):
     path = Path(__file__).parent / filename
     spec = importlib_util.spec_from_file_location(module_name, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Unable to load phase module: {path}")
     module = importlib_util.module_from_spec(spec)
-    assert spec and spec.loader
     sys.modules[module_name] = module
     spec.loader.exec_module(module)
     return module
 
-
-PHASE_MODULES = {
-    "clean": load_phase_module(PHASE_FILES["clean"], "phase1_clean_numba"),
-    "graph": load_phase_module(PHASE_FILES["graph"], "phase2_graph_numba"),
-    "algos": load_phase_module(PHASE_FILES["algos"], "phase3_algos_numba"),
-    "score": load_phase_module(PHASE_FILES["score"], "phase4_score_numba"),
-}
+def _load_phase_modules() -> Dict[str, object]:
+    """Deferred phase module loading (avoids import-time side effects)."""
+    package = __package__ or "concurrentNumba"
+    return {
+        "clean": load_phase_module(PHASE_FILES["clean"], f"{package}.phase1_clean"),
+        "graph": load_phase_module(PHASE_FILES["graph"], f"{package}.phase2_graph"),
+        "algos": load_phase_module(PHASE_FILES["algos"], f"{package}.phase3_algos"),
+        "score": load_phase_module(PHASE_FILES["score"], f"{package}.phase4_score"),
+    }
 
 import shutil
-import glob
-from pathlib import Path
 
 
 def cleanup_intermediate_data(run_out_dir: Path):
@@ -263,6 +270,7 @@ def run_once(
         approach: str,
         out_root: Path,
         dataset_name: str,
+        phase_modules: Dict[str, object],
 ) -> Dict:
     run_id = unique_run_id()
     print(f"=== Run {run_id} | dataset={dataset_name} | approach={approach} ===", flush=True)
@@ -289,7 +297,7 @@ def run_once(
     # Phase 1: clean
     print(f"[{run_id}] Starting phase1_clean", flush=True)
     t0 = time.perf_counter()
-    clean_res = PHASE_MODULES["clean"].run_from_pipeline(
+    clean_res = phase_modules["clean"].run_from_pipeline(
         pipeline_cfg,
         out_dir=phase_dirs["phase1_clean"],
         approach=approach,
@@ -311,7 +319,7 @@ def run_once(
     # Phase 2: graph build
     print(f"[{run_id}] Starting phase2_graph", flush=True)
     t0 = time.perf_counter()
-    graph_res = PHASE_MODULES["graph"].run_from_pipeline(
+    graph_res = phase_modules["graph"].run_from_pipeline(
         pipeline_cfg,
         clean_dir=Path(clean_res["artifacts"]["clean_dir"]),
         clean_manifest=clean_manifest_val,
@@ -327,7 +335,7 @@ def run_once(
     # Phase 3: algorithms
     print(f"[{run_id}] Starting phase3_algos", flush=True)
     t0 = time.perf_counter()
-    alg_res = PHASE_MODULES["algos"].run_from_pipeline(
+    alg_res = phase_modules["algos"].run_from_pipeline(
         pipeline_cfg,
         graph_input_dir=Path(graph_res["artifacts"]["edges"]).parent,
         out_dir=phase_dirs["phase3_algos"],
@@ -342,7 +350,7 @@ def run_once(
     # Phase 4: scoring
     print(f"[{run_id}] Starting phase4_score", flush=True)
     t0 = time.perf_counter()
-    score_res = PHASE_MODULES["score"].run_from_pipeline(
+    score_res = phase_modules["score"].run_from_pipeline(
         pipeline_cfg,
         graph_algos_dir=phase_dirs["phase3_algos"],
         out_dir=phase_dirs["phase4_score"],
@@ -461,6 +469,17 @@ def main() -> None:
             "started_utc": res.get("start_utc"),
         }
 
+    phase_modules = _load_phase_modules()
+
+    if _HAS_NUMBA:
+        use_numba_cfg = bool(
+            pipeline_cfg.get("phase1_clean", {}).get("use_numba", True)
+            or pipeline_cfg.get("phase4_score", {}).get("use_numba", True)
+        )
+        if use_numba_cfg:
+            logging.info("[Startup] Pre-warming Numba kernels ...")
+            warmup_all_kernels()
+
     rows = []
     for _ in tqdm(range(runs), desc="Pipeline runs", unit="run"):
         res = run_once(
@@ -468,6 +487,7 @@ def main() -> None:
             approach=args.approach,
             out_root=out_root,
             dataset_name=dataset_name,
+            phase_modules=phase_modules,
         )
         rows.append(build_row(res))
         run_dir = out_root / res["run_id"]
@@ -478,7 +498,7 @@ def main() -> None:
             approach=args.approach,
             run_id=res["run_id"],
             total_pipeline=res["timings"].get("total", 0.0),
-            started_utc=res.get("start_utc"),
+            started_utc=str(res.get("start_utc") or ""),
         )
         append_run_metrics_row(run_metrics_csv, metrics_row)
 

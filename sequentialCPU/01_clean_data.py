@@ -36,7 +36,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -46,24 +45,19 @@ import numpy as np
 import pandas as pd
 import yaml
 
-# sys.path injection so importlib-based loading (run_pipeline.py) works too
-_HERE = Path(__file__).parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
-
 try:
     from tqdm import tqdm as _tqdm
     _HAS_TQDM = True
 except ImportError:
     _HAS_TQDM = False
 
-from config import CleanConfig, load_config                      # type: ignore[import]
-from fingerprint import create_dataset_fingerprint               # type: ignore[import]
-from normalizers import (                                        # type: ignore[import]
+from .config import CleanConfig, load_config
+from .fingerprint import create_dataset_fingerprint
+from .normalizers import (
     NORMALIZATION_VERSION, NORMALIZATION_DESCRIPTION, HASH_FUNCTION,
 )
-from schema import CANONICAL_COLS, make_canonical_meta           # type: ignore[import]
-from transforms import canonicalize_chunk                        # type: ignore[import]
+from .schema import CANONICAL_COLS, make_canonical_meta
+from .transforms import canonicalize_chunk
 
 
 # ---------------------------------------------------------------------------

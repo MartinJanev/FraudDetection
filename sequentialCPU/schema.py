@@ -25,14 +25,10 @@ from typing import Dict, List, Optional
 import numpy as np
 import pandas as pd
 
-# sys.path injection so direct-file loading (importlib) works too
-import sys
-from pathlib import Path as _Path
-_HERE = _Path(__file__).parent
-if str(_HERE) not in sys.path:
-    sys.path.insert(0, str(_HERE))
+from .config import CleanConfig
 
-from config import CleanConfig  # type: ignore[import]
+# String dtype used in canonical metadata tables.
+STRING_DTYPE = "string[python]"
 
 # ---------------------------------------------------------------------------
 # Canonical output schema
@@ -148,7 +144,7 @@ def make_canonical_meta(_: CleanConfig) -> pd.DataFrame:
 
     Used as the fallback output when no records survive cleaning.
     """
-    S = "string[python]"
+    S = STRING_DTYPE
     dtypes = {
         "record_id":     S, "program_year": "Int16", "dataset_type": S, "source_file": S,
         "payer_name_raw": S, "payer_name_norm": S,

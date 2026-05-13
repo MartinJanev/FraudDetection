@@ -6,7 +6,8 @@ Kernels
 -------
 _fast_hash_mask         – parallel boolean mask for hash-based row sampling
 _parse_amounts_kernel   – parallel validity check (non-negative, non-NaN amounts)
-_robust_z_kernel        – parallel robust Z-score (0.6745*(x-median)/MAD)
+    _robust_z_kernel        – parallel robust Z-score (0.6745*(x-median)/MAD)
+    _weighted_sum_scores    – parallel weighted sum for scoring
 
 When Numba is not installed every kernel falls back to an equivalent pure-NumPy
 implementation so the rest of the pipeline remains functional without GPU/JIT support.
@@ -36,6 +37,8 @@ except ImportError:
 # ---------------------------------------------------------------------------
 # Kernels
 # ---------------------------------------------------------------------------
+
+_WARMED_UP = False
 
 if _HAS_NUMBA:
     @njit(parallel=True, cache=True)
@@ -126,6 +129,29 @@ if _HAS_NUMBA:
             out[i] = 0.6745 * (x[i] - med) / denom
         return out
 
+    @njit(parallel=True, cache=True)
+    def _weighted_sum_scores(
+        z_in_w: np.ndarray,
+        z_in_deg: np.ndarray,
+        z_out_w: np.ndarray,
+        z_out_deg: np.ndarray,
+        w_in_w: float,
+        w_in_deg: float,
+        w_out_w: float,
+        w_out_deg: float,
+    ) -> np.ndarray:
+        """Compute weighted risk score in parallel."""
+        n = z_in_w.shape[0]
+        out = np.empty(n, dtype=np.float64)
+        for i in prange(n):
+            out[i] = (
+                w_in_w * z_in_w[i]
+                + w_in_deg * z_in_deg[i]
+                + w_out_w * z_out_w[i]
+                + w_out_deg * z_out_deg[i]
+            )
+        return out
+
 else:
     # ------------------------------------------------------------------
     # Pure-NumPy fallbacks (identical semantics, no parallelism)
@@ -143,17 +169,49 @@ else:
         mad = np.median(np.abs(x - med)) + eps
         return 0.6745 * (x - med) / mad
 
+    def _weighted_sum_scores(  # type: ignore[misc]
+        z_in_w: np.ndarray,
+        z_in_deg: np.ndarray,
+        z_out_w: np.ndarray,
+        z_out_deg: np.ndarray,
+        w_in_w: float,
+        w_in_deg: float,
+        w_out_w: float,
+        w_out_deg: float,
+    ) -> np.ndarray:
+        return (
+            w_in_w * z_in_w
+            + w_in_deg * z_in_deg
+            + w_out_w * z_out_w
+            + w_out_deg * z_out_deg
+        )
 
-def warmup_kernels() -> None:
+
+def warmup_all_kernels() -> None:
     """Pre-compile all Numba kernels so the first real call is not slowed by JIT.
 
     Safe to call even when Numba is unavailable (becomes a no-op).
     """
-    if not _HAS_NUMBA:
+    global _WARMED_UP
+    if _WARMED_UP or not _HAS_NUMBA:
         return
     _dummy_amt = np.array([1.0, -1.0, float("nan")], dtype=np.float64)
     _parse_amounts_kernel(_dummy_amt)
     _dummy_h = np.array([0, 1000, 9_999_999, 10_000_000], dtype=np.uint64)
     _fast_hash_mask(_dummy_h, np.uint64(5_000_000))
-    logging.info("[Phase 1] Numba JIT warm-up complete")
+    _dummy = np.array([1.0, 2.0, 3.0], dtype=np.float64)
+    _robust_z_kernel(_dummy, 1e-9)
+    _weighted_sum_scores(_dummy, _dummy, _dummy, _dummy, 0.55, 0.25, 0.10, 0.10)
+    _WARMED_UP = True
+    logging.info("[Numba] JIT warm-up complete")
+
+
+def warmup_kernels() -> None:
+    """Backward-compatible alias for full kernel warmup."""
+    warmup_all_kernels()
+
+
+# Public aliases for external imports
+robust_z_kernel = _robust_z_kernel
+weighted_sum_scores = _weighted_sum_scores
 

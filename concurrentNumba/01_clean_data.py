@@ -36,12 +36,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import sys as _sys
-from pathlib import Path as _Path
-_HERE = _Path(__file__).parent
-if str(_HERE) not in _sys.path:
-    _sys.path.insert(0, str(_HERE))
-
 import numpy as np
 import pandas as pd
 import yaml
@@ -60,11 +54,11 @@ except ImportError:
     _HAS_TQDM = False
 
 # Sub-module imports
-from config import CleanConfig, load_config                          # type: ignore[import]
-from normalizers import NORMALIZATION_VERSION, NORMALIZATION_DESCRIPTION, HASH_FUNCTION, FINGERPRINT_MB  # type: ignore[import]
-from numba_kernels import _HAS_NUMBA, warmup_kernels                 # type: ignore[import]
-from schema import CANONICAL_COLS, make_canonical_meta, sanitize_for_parquet  # type: ignore[import]
-from transforms import canonicalize_partition                         # type: ignore[import]
+from .config import CleanConfig, load_config
+from .normalizers import NORMALIZATION_VERSION, NORMALIZATION_DESCRIPTION, HASH_FUNCTION, FINGERPRINT_MB
+from .numba_kernels import _HAS_NUMBA, warmup_kernels
+from .schema import CANONICAL_COLS, make_canonical_meta, sanitize_for_parquet
+from .transforms import canonicalize_partition
 
 
 # ---------------------------------------------------------------------------
