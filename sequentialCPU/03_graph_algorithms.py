@@ -164,14 +164,8 @@ def run(cfg: AlgoConfig) -> None:
     total_time = time.perf_counter() - t0
 
     report = {
-        "inputs": {
-            "edges_path": str(Path(cfg.graph_dir) / "edges.parquet"),
+        "counts": {
             "edges": int(len(edges)),
-        },
-        "outputs": {
-            "degree": str(degrees_path),
-            "pagerank": str(pagerank_path),
-            "components": str(components_path) if comp_df is not None else None,
         },
         "timings_sec": {
             "degree": t_deg,
@@ -185,6 +179,7 @@ def run(cfg: AlgoConfig) -> None:
             "pagerank_max_iter": cfg.pagerank_max_iter,
             "compute_components": cfg.compute_components,
         },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     report_path = out_dir / "algos_report.json"
@@ -278,4 +273,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-

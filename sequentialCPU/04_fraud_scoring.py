@@ -286,14 +286,6 @@ def run(cfg: ScoreConfig) -> None:
     total = time.perf_counter() - t0
 
     report = {
-        "inputs": {
-            "graph_dir": cfg.graph_dir,
-            "degree_path": degree_path,
-        },
-        "outputs": {
-            "risk_scores": out_scores,
-            "topk": out_topk,
-        },
         "scoring": {
             "method": cfg.method,
             "score_node_types": cfg.score_node_types,

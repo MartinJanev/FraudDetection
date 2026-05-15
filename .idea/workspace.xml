@@ -4,37 +4,24 @@
     <option name="autoReloadType" value="ALL" />
   </component>
   <component name="ChangeListManager">
-    <list default="true" id="f725bebf-47a6-46cf-819c-59d24d69138e" name="Changes" comment="clean not needed functions">
-      <change afterPath="$PROJECT_DIR$/concurrentNumba/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/engineering_review.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/sequentialCPU/__init__.py" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tools/README_synthetic_data.md" afterDir="false" />
-      <change afterPath="$PROJECT_DIR$/tools/synthetic_data_expand.py" afterDir="false" />
+    <list default="true" id="f725bebf-47a6-46cf-819c-59d24d69138e" name="Changes" comment="">
       <change beforePath="$PROJECT_DIR$/.gitignore" beforeDir="false" afterPath="$PROJECT_DIR$/.gitignore" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/ParallelFraudDetection.iml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/ParallelFraudDetection.iml" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/.idea/misc.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/.idea/workspace.xml" beforeDir="false" afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/concurrentNumba/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/01_clean_data.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/concurrentNumba/02_build_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/02_build_graph.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/concurrentNumba/03_graph_algorithms.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/03_graph_algorithms.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentNumba/04_fraud_scoring.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/04_fraud_scoring.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentNumba/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/README.md" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentNumba/numba_kernels.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/numba_kernels.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/concurrentNumba/configs/pipeline_general_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/configs/pipeline_general_2024.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/concurrentNumba/run_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/run_pipeline.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/concurrentNumba/schema.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/schema.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/concurrentNumba/transforms.py" beforeDir="false" afterPath="$PROJECT_DIR$/concurrentNumba/transforms.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/old/concurrentCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/01_clean_data.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/old/concurrentCPU/02_build_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/02_build_graph.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/old/concurrentCPU/03_graph_algorithms.py" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/03_graph_algorithms.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/old/concurrentCPU/README.md" beforeDir="false" afterPath="$PROJECT_DIR$/old/concurrentCPU/README.md" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/requirements.txt" beforeDir="false" afterPath="$PROJECT_DIR$/requirements.txt" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/sequentialCPU/01_clean_data.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/01_clean_data.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/02_build_graph.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/02_build_graph.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/03_graph_algorithms.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/03_graph_algorithms.py" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/sequentialCPU/04_fraud_scoring.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/04_fraud_scoring.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/sequentialCPU/fingerprint.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/fingerprint.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_general_2024.yaml" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/configs/pipeline_general_2024.yaml" afterDir="false" />
       <change beforePath="$PROJECT_DIR$/sequentialCPU/run_pipeline.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/run_pipeline.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/sequentialCPU/schema.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/schema.py" afterDir="false" />
-      <change beforePath="$PROJECT_DIR$/sequentialCPU/transforms.py" beforeDir="false" afterPath="$PROJECT_DIR$/sequentialCPU/transforms.py" afterDir="false" />
     </list>
     <option name="SHOW_DIALOG" value="false" />
     <option name="HIGHLIGHT_CONFLICTS" value="true" />
@@ -44,7 +31,7 @@
   <component name="CopilotChats">
     <option name="panelChat">
       <chat>
-        <option name="activeSessionId" value="36832a48-9d32-4145-ab85-0e70d7b44480" />
+        <option name="activeSessionId" value="e580ec03-0bf3-4241-8a94-056fb0eb48dc" />
         <option name="sessions">
           <session>
             <option name="chatType" value="PANEL" />
@@ -73,16 +60,49 @@
           </session>
           <session>
             <option name="chatType" value="PANEL" />
-            <option name="id" value="e7b57cf1-e31b-4399-a979-5b109dabf2d3" />
+            <option name="id" value="6a3f0739-6bfe-43e2-901e-bd26925953bd" />
             <option name="modeId" value="Agent" />
             <option name="modelType" value="builtin_family" />
-            <option name="modelValue" value="auto" />
+            <option name="modelValue" value="gpt-5.2-codex" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="25dd3739-9148-4d9f-9230-830965aa118d" />
+            <option name="modeId" value="Agent" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="gpt-5.2-codex" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="0ba09375-0798-4c86-b68e-306927b6849f" />
+            <option name="modeId" value="Agent" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="gpt-5.2-codex" />
             <option name="status" value="Completed" />
             <option name="targetType" value="LOCAL" />
           </session>
           <session>
             <option name="chatType" value="PANEL" />
-            <option name="id" value="36832a48-9d32-4145-ab85-0e70d7b44480" />
+            <option name="id" value="8eb37e9b-0e0f-4caa-90f2-e336b6dfa77b" />
+            <option name="modeId" value="file:///snapshot/cls-source/dist/assets/agents/Plan.agent.md" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="gpt-5.2-codex" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="db32b47c-1856-4565-b809-43864a12c8b4" />
+            <option name="modeId" value="Agent" />
+            <option name="modelType" value="builtin_family" />
+            <option name="modelValue" value="gpt-5.2-codex" />
+            <option name="status" value="Completed" />
+            <option name="targetType" value="LOCAL" />
+          </session>
+          <session>
+            <option name="chatType" value="PANEL" />
+            <option name="id" value="6b6b3894-7354-4b9c-97b8-889656f2fe4c" />
             <option name="modeId" value="Agent" />
             <option name="modelType" value="builtin_family" />
             <option name="modelValue" value="gpt-5.2-codex" />
@@ -154,32 +174,32 @@
     <option name="hideEmptyMiddlePackages" value="true" />
     <option name="showLibraryContents" value="true" />
   </component>
-  <component name="PropertiesComponent"><![CDATA[{
-  "keyToString": {
-    "ModuleVcsDetector.initialDetectionPerformed": "true",
-    "Python.01_clean_data.executor": "Run",
-    "Python.check_ownership.executor": "Run",
-    "Python.full_verification.executor": "Run",
-    "Python.test_setup.executor": "Run",
-    "Python.verify_output.executor": "Run",
-    "RunOnceActivity.ShowReadmeOnStart": "true",
-    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
-    "RunOnceActivity.git.unshallow": "true",
-    "RunOnceActivity.typescript.service.memoryLimit.init": "true",
-    "SHELLCHECK.PATH": "I do mind",
-    "ai.playground.ignore.import.keys.banner.in.settings": "true",
-    "codeWithMe.voiceChat.enabledByDefault": "false",
-    "git-widget-placeholder": "master",
-    "last_opened_file_path": "/Users/martinjanev/PycharmProjects/FraudDetection/CMS_Open_Payements2024",
-    "node.js.detected.package.eslint": "true",
-    "node.js.detected.package.tslint": "true",
-    "node.js.selected.package.eslint": "(autodetect)",
-    "node.js.selected.package.tslint": "(autodetect)",
-    "nodejs_package_manager_path": "npm",
-    "settings.editor.selected.configurable": "preferences.pluginManager",
-    "vue.rearranger.settings.migration": "true"
+  <component name="PropertiesComponent">{
+  &quot;keyToString&quot;: {
+    &quot;ModuleVcsDetector.initialDetectionPerformed&quot;: &quot;true&quot;,
+    &quot;Python.01_clean_data.executor&quot;: &quot;Run&quot;,
+    &quot;Python.check_ownership.executor&quot;: &quot;Run&quot;,
+    &quot;Python.full_verification.executor&quot;: &quot;Run&quot;,
+    &quot;Python.test_setup.executor&quot;: &quot;Run&quot;,
+    &quot;Python.verify_output.executor&quot;: &quot;Run&quot;,
+    &quot;RunOnceActivity.ShowReadmeOnStart&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.git.unshallow&quot;: &quot;true&quot;,
+    &quot;RunOnceActivity.typescript.service.memoryLimit.init&quot;: &quot;true&quot;,
+    &quot;SHELLCHECK.PATH&quot;: &quot;I do mind&quot;,
+    &quot;ai.playground.ignore.import.keys.banner.in.settings&quot;: &quot;true&quot;,
+    &quot;codeWithMe.voiceChat.enabledByDefault&quot;: &quot;false&quot;,
+    &quot;git-widget-placeholder&quot;: &quot;master&quot;,
+    &quot;last_opened_file_path&quot;: &quot;/Users/martinjanev/PycharmProjects/FraudDetection/CMS_Open_Payements2024&quot;,
+    &quot;node.js.detected.package.eslint&quot;: &quot;true&quot;,
+    &quot;node.js.detected.package.tslint&quot;: &quot;true&quot;,
+    &quot;node.js.selected.package.eslint&quot;: &quot;(autodetect)&quot;,
+    &quot;node.js.selected.package.tslint&quot;: &quot;(autodetect)&quot;,
+    &quot;nodejs_package_manager_path&quot;: &quot;npm&quot;,
+    &quot;settings.editor.selected.configurable&quot;: &quot;preferences.pluginManager&quot;,
+    &quot;vue.rearranger.settings.migration&quot;: &quot;true&quot;
   }
-}]]></component>
+}</component>
   <component name="RecentsManager">
     <key name="CopyFile.RECENT_KEYS">
       <recent name="$PROJECT_DIR$/CMS_Open_Payements2024" />
@@ -189,11 +209,11 @@
       <recent name="D:\ParallelFraudDetection\sequentialCPU" />
     </key>
     <key name="MoveFile.RECENT_KEYS">
+      <recent name="$PROJECT_DIR$/output" />
+      <recent name="$PROJECT_DIR$/old" />
       <recent name="$PROJECT_DIR$/CMS_Open_Payements2024" />
       <recent name="D:\ParallelFraudDetection" />
       <recent name="D:\ParallelFraudDetection\parallelGPU\configs\output\payments_clean" />
-      <recent name="D:\ParallelFraudDetection\concurentCPU" />
-      <recent name="D:\ParallelFraudDetection\\" />
     </key>
   </component>
   <component name="RunManager" selected="Python.01_clean_data">
@@ -512,7 +532,11 @@
       <workItem from="1778401675109" duration="13367000" />
       <workItem from="1778420719364" duration="22000" />
       <workItem from="1778674860788" duration="1675000" />
-      <workItem from="1778685941199" duration="7701000" />
+      <workItem from="1778685941199" duration="10016000" />
+      <workItem from="1778697055164" duration="11000" />
+      <workItem from="1778786328311" duration="786000" />
+      <workItem from="1778832653988" duration="3677000" />
+      <workItem from="1778885214627" duration="3839000" />
     </task>
     <task id="LOCAL-00001" summary="fixed sequentialCPU with fractional data work">
       <option name="closed" value="true" />
@@ -546,7 +570,15 @@
       <option name="project" value="LOCAL" />
       <updated>1770121085719</updated>
     </task>
-    <option name="localTasksCounter" value="5" />
+    <task id="LOCAL-00005" summary="refactoring and cleaning the codebase">
+      <option name="closed" value="true" />
+      <created>1778693990561</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1778693990561</updated>
+    </task>
+    <option name="localTasksCounter" value="6" />
     <servers />
   </component>
   <component name="TypeScriptGeneratedFilesManager">
@@ -556,7 +588,8 @@
     <MESSAGE value="fixed sequentialCPU with fractional data work" />
     <MESSAGE value="latest project version" />
     <MESSAGE value="clean not needed functions" />
-    <option name="LAST_COMMIT_MESSAGE" value="clean not needed functions" />
+    <MESSAGE value="refactoring and cleaning the codebase" />
+    <option name="LAST_COMMIT_MESSAGE" value="refactoring and cleaning the codebase" />
   </component>
   <component name="com.intellij.coverage.CoverageDataManagerImpl">
     <SUITE FILE_PATH="coverage/ParallelFraudDetection$full_verification.coverage" NAME="full_verification Coverage Results" MODIFIED="1769441370455" SOURCE_PROVIDER="com.intellij.coverage.DefaultCoverageFileProvider" RUNNER="coverage.py" COVERAGE_BY_TEST_ENABLED="false" COVERAGE_TRACING_ENABLED="false" WORKING_DIRECTORY="$PROJECT_DIR$/sequentialCPU" />

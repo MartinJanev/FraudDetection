@@ -413,15 +413,9 @@ def run(cfg: AlgoConfig) -> None:
     total_time = time.perf_counter() - t0
 
     report = {
-        "inputs": {
-            "edges_path": str(edges_path),
+        "counts": {
             "edges": int(edges_count),
             "nodes": int(n_nodes),
-        },
-        "outputs": {
-            "degree": str(degrees_path),
-            "pagerank": str(pagerank_path),
-            "components": str(components_path) if comp_df is not None else None,
         },
         "timings_sec": {
             "degree": float(t_deg),

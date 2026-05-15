@@ -36,6 +36,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -184,7 +185,6 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
     rows_valid        = 0
     rows_rejected     = 0
     part_num          = 0
-    amounts: List[np.ndarray] = []
     physician_count   = 0
     hospital_count    = 0
     missing_npi       = 0
@@ -193,7 +193,14 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
     manifest_clean: List[Dict]    = []
     manifest_rejected: List[Dict] = []
 
+    running_min = float("inf")
+    running_max = float("-inf")
+    running_sum = 0.0
+    running_count = 0
+
     do_sampling = cfg.sampling_fraction < 0.9999
+    sampling_strategy = "head_slice_first_x_percent"
+    compute_stats = bool(getattr(cfg, "compute_stats", True))
 
     logging.info(
         "[Phase 1] ── Stage 2/5: Reading + cleaning chunks ──  "
@@ -216,9 +223,20 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
             fname, total_rows, total_chunks, cfg.chunk_size,
         )
 
+        if do_sampling and cfg.sampling_fraction < 0.9999:
+            rows_to_read = max(cfg.chunk_size, int(math.ceil(total_rows * cfg.sampling_fraction)))
+        else:
+            rows_to_read = None
+
+        if rows_to_read is not None:
+            sampling_strategy = "early_termination_nrows"
+
+        apply_chunk_sampling = do_sampling and rows_to_read is None
+
         reader = pd.read_csv(
             fpath,
             chunksize=cfg.chunk_size,
+            nrows=rows_to_read,
             low_memory=False,
             dtype=str,          # ingest as string; we parse deterministically
             encoding="utf-8",
@@ -236,7 +254,7 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
             canon = canonicalize_chunk(chunk, cfg, source_file=fname)
 
             # Deterministic head-slice sampling
-            if do_sampling:
+            if apply_chunk_sampling:
                 canon = _apply_sampling(canon, cfg.sampling_fraction)
 
             rows_after_sample += len(canon)
@@ -250,7 +268,16 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
             rows_rejected += len(rej_df)
 
             if len(valid_df) > 0:
-                amounts.append(valid_df["amount_usd"].to_numpy())
+                if compute_stats:
+                    chunk_amounts = valid_df["amount_usd"].to_numpy(dtype="float64", na_value=float("nan"))
+                    valid_mask = ~np.isnan(chunk_amounts)
+                    if valid_mask.any():
+                        chunk_clean = chunk_amounts[valid_mask]
+                        running_min = min(running_min, float(chunk_clean.min()))
+                        running_max = max(running_max, float(chunk_clean.max()))
+                        running_sum += float(chunk_clean.sum())
+                        running_count += int(len(chunk_clean))
+
                 physician_count += int((valid_df["payee_type"] == "physician").sum())
                 hospital_count  += int((valid_df["payee_type"] == "teaching_hospital").sum())
 
@@ -309,13 +336,12 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
     # ── Stage 4: Amount statistics ────────────────────────────────────────────
     logging.info("[Phase 1] ── Stage 4/5: Computing statistics ──")
     t_stats_start = time.perf_counter()
-    if amounts:
-        all_amt = np.concatenate(amounts)
+    if compute_stats and running_count > 0:
         amt_stats = {
-            "min":    float(np.nanmin(all_amt)),
-            "mean":   float(np.nanmean(all_amt)),
-            "median": float(np.nanmedian(all_amt)),
-            "max":    float(np.nanmax(all_amt)),
+            "min":    running_min,
+            "mean":   running_sum / running_count,
+            "median": None,
+            "max":    running_max,
         }
     else:
         amt_stats = {"min": None, "mean": None, "median": None, "max": None}
@@ -341,7 +367,7 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
             "fraction":          float(cfg.sampling_fraction),
             "seed":              cfg.sampling_seed,
             "enabled":           do_sampling,
-            "strategy":          "head_slice_first_x_percent",
+            "strategy":          sampling_strategy,
             "rows_before":       int(rows_in),
             "rows_after":        int(rows_after_sample),
             "retention_rate":    float(rows_after_sample / rows_in) if rows_in else None,
@@ -468,13 +494,17 @@ def run_from_pipeline(
         "sampling_seed":     cfg.sampling_seed,
         "max_workers":       1,
     }
-    cfg_path = out_dir / "config_from_pipeline.yaml"
-    with open(cfg_path, "w", encoding="utf-8") as f:
+    tmp_cfg_path = out_dir / "config_used_tmp.yaml"
+    with open(tmp_cfg_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg_snapshot, f)
 
     start_ts = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
-    run(cfg, config_path=str(cfg_path))
+    try:
+        run(cfg, config_path=str(tmp_cfg_path))
+    finally:
+        if tmp_cfg_path.exists():
+            tmp_cfg_path.unlink()
     wall = time.perf_counter() - t0
     end_ts = datetime.now(timezone.utc).isoformat()
 

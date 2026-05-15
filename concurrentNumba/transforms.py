@@ -267,7 +267,8 @@ def _build_record_id_series(
         + payment_date.fillna("").astype(str) + sep
         + nature.where(nature.notna(), "").astype(str)
     )
-    return key.map(lambda s: hashlib.sha1(s.encode("utf-8")).hexdigest()).astype("string[python]")
+    raw_hash = pd.util.hash_pandas_object(key, index=False)
+    return raw_hash.apply(lambda h: format(h, "016x")).astype("string[python]")
 
 
 def _compute_validity_flags(

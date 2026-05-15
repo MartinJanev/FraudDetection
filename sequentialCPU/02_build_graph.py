@@ -350,16 +350,8 @@ def run(cfg: GraphBuildConfig) -> None:
 
     total_time = time.perf_counter() - t0
     report = {
-        "inputs": {
-            "clean_dir": cfg.input_clean_dir,
-            "manifest": cfg.input_clean_manifest,
-            "parts": len(parts),
-        },
-        "outputs": {
-            "edges_path": edges_path,
-            "nodes_path": nodes_path,
-        },
         "counts": {
+            "input_parts": len(parts),
             **totals,
             **edge_stats,
             **node_counts,
@@ -379,6 +371,7 @@ def run(cfg: GraphBuildConfig) -> None:
             "date_col": cfg.date_col,
             "min_edge_weight": cfg.min_edge_weight,
         },
+        "generated_at": datetime.now(timezone.utc).isoformat(),
     }
 
     report_path = str(output_dir / "graph_build_report.json")

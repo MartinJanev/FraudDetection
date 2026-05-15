@@ -177,11 +177,6 @@ def run_once(
     }
     ensure_dirs(list(phase_dirs.values()))
 
-    # Save config snapshot
-    cfg_snapshot_path = phase_dirs["reports"] / "config_snapshot.yaml"
-    with open(cfg_snapshot_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(pipeline_cfg, f)
-
     timings = {}
     phase_reports = []
 
@@ -218,7 +213,8 @@ def run_once(
 
 
     # Display to terminal that phase 1 is complete
-    print(f"Phase 1 complete. Cleaned data at: {clean_res['artifacts']['clean_dir']}")
+    if "phase1_clean" in timings:
+        print(f"Phase 1 complete in {timings['phase1_clean']:.2f}s")
 
     # Phase 2: graph build
     graph_res = None
@@ -246,7 +242,8 @@ def run_once(
         }
 
     # Display to terminal that phase 2 is complete
-    print(f"Phase 2 complete. Graph edges at: {graph_res['artifacts']['edges']}")
+    if "phase2_graph" in timings:
+        print(f"Phase 2 complete in {timings['phase2_graph']:.2f}s")
 
     # Phase 3: algorithms
     alg_res = None
@@ -273,8 +270,8 @@ def run_once(
         }
 
     # Display to terminal that phase 3 is complete
-    print(f"Phase 3 complete. Algorithm outputs at: {phase_dirs['phase3_algos']}")
-
+    if "phase3_algos" in timings:
+        print(f"Phase 3 complete in {timings['phase3_algos']:.2f}s")
 
     # Phase 4: scoring
     score_res = None
@@ -293,24 +290,31 @@ def run_once(
 
     timings["total"] = time.perf_counter() - t_total_start
 
-
     timings_path = phase_dirs["reports"] / "timings.json"
+    phase_reports_public = [
+        {k: v for k, v in report.items() if k != "artifacts"}
+        for report in phase_reports
+    ]
     run_report = {
         "run_id": run_id,
         "dataset": dataset_name,
         "approach": approach,
         "start_utc": phase_reports[0].get("start_utc") if phase_reports else None,
         "end_utc": phase_reports[-1].get("end_utc") if phase_reports else None,
-        "phase_reports": phase_reports,
+        "phase_reports": phase_reports_public,
         "timings_sec": timings,
         "phases_run": phases_to_run,
+        "execution": {
+            "max_workers": 1,
+            "use_numba": False,
+            "chunk_size": pipeline_cfg.get("phase1_clean", {}).get("chunk_size"),
+        },
     }
     with open(timings_path, "w", encoding="utf-8") as f:
         json.dump(run_report, f, indent=2)
 
-
     # Display to terminal that the entire pipeline run is complete
-    print(f"Pipeline run complete. All artifacts under: {run_dir}")
+    print(f"Pipeline run complete in {timings['total']:.2f}s")
 
     return {
         "run_id": run_id,
@@ -399,9 +403,9 @@ def main() -> None:
 
     compute_summary(timing_csv, timing_summary)
 
-    print(f"Completed {len(run_records)} run(s). Results under {out_root}")
-    print(f"Aggregate timings: {timing_csv}")
-    print(f"Summary: {timing_summary}")
+    print(f"Completed {len(run_records)} run(s).")
+    print("Aggregate timings updated.")
+    print("Summary updated.")
 
     for r in run_records:
             cleanup_intermediate_data(reuse_dir if reuse_dir else out_root / r["run_id"])

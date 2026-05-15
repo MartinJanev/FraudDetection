@@ -66,3 +66,4 @@ a_doc/
 *.hdf5
 .idea
 
+/output_so_relevant_data/

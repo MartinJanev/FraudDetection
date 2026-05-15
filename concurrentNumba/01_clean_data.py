@@ -27,8 +27,10 @@ transforms.py       build_payee_fields_vectorized, canonicalize_partition,
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
+import math
 import shutil
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -36,7 +38,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 
-import numpy as np
+import contextlib
+import sys
+import threading
+
 import pandas as pd
 import yaml
 
@@ -47,10 +52,19 @@ warnings.filterwarnings(
 )
 
 try:
+    import pyarrow.csv as pa_csv
+    import pyarrow as pa
+    _HAS_PYARROW_CSV = True
+except ImportError:
+    _HAS_PYARROW_CSV = False
+
+import numpy as np
+
+try:
     from tqdm import tqdm as _tqdm
     _HAS_TQDM = True
 except ImportError:
-    _tqdm = None          # type: ignore[assignment]
+    _tqdm = None
     _HAS_TQDM = False
 
 # Sub-module imports
@@ -113,6 +127,13 @@ def _write_parquet_partitioned(df: pd.DataFrame, out_dir: Path, chunk_size: int)
         part.to_parquet(str(out_dir / f"part-{i:04d}.parquet"), index=False, engine="pyarrow")
 
 
+def _write_parquet_part(df: pd.DataFrame, out_dir: Path, part_num: int) -> None:
+    """Write a single parquet part file with a deterministic part number."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    part_file = out_dir / f"part-{part_num:05d}.parquet"
+    df.to_parquet(str(part_file), index=False, engine="pyarrow")
+
+
 # ---------------------------------------------------------------------------
 # Per-chunk processor
 # ---------------------------------------------------------------------------
@@ -124,6 +145,7 @@ def _process_chunk(
     chunk_idx: int,
     do_sampling: bool,
     sampling_stage: str,
+    canon_semaphore: Optional[threading.Semaphore],
 ) -> pd.DataFrame:
     """Process a single CSV chunk.
 
@@ -150,18 +172,19 @@ def _process_chunk(
         ``True`` when ``cfg.sampling_fraction < 0.9999``.
     sampling_stage:
         ``"raw"`` or ``"canonical"`` – controls when the slice is applied.
+    canon_semaphore:
+        Semaphore to throttle canonicalization.
     """
     if do_sampling and sampling_stage == "raw":
         frac = cfg.sampling_fraction
         if frac < 0.9999:
-            # Deterministic head-slice: first X % of each chunk
             n_keep = max(1, int(round(len(chunk_df) * frac)))
             chunk_df = chunk_df.iloc[:n_keep].reset_index(drop=True)
 
-    canon = canonicalize_partition(chunk_df, cfg, source_file)
+    with canon_semaphore or contextlib.nullcontext():
+        canon = canonicalize_partition(chunk_df, cfg, source_file)
 
     if do_sampling and sampling_stage == "canonical":
-        # Deterministic head-slice: first X % of canonicalised rows
         n_keep = max(1, int(round(len(canon) * cfg.sampling_fraction)))
         canon = canon.iloc[:n_keep]
 
@@ -215,10 +238,19 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
         ensure_dir(str(rej_dir))
 
     max_workers = cfg.max_workers if cfg.max_workers and cfg.max_workers > 0 else None
+    if sys.platform == "darwin" and max_workers is not None:
+        max_workers = min(max_workers, 10)
     logging.info(
         "[Phase 1] Numba concurrent cleaning started | max_workers=%s | chunk_size=%s",
         max_workers, cfg.chunk_size,
     )
+
+    canon_limit = None
+    if max_workers and max_workers > 1:
+        canon_limit = max(1, max_workers // 2)
+    canon_semaphore = threading.Semaphore(canon_limit) if canon_limit else None
+    if canon_semaphore:
+        logging.info("[Phase 1] Canonicalization throttled | max_in_flight=%d", canon_limit)
 
     # Warm up Numba JIT (first call compiles kernels)
     if cfg.use_numba and _HAS_NUMBA:
@@ -226,14 +258,25 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
 
     do_sampling   = cfg.sampling_fraction < 0.9999
     sampling_stage = (cfg.sampling_stage or "canonical").lower().strip()
+    sampling_strategy = "head_slice_first_x_percent"
 
     # ------------------------------------------------------------------
     # Stage 1 – Read CSV files, submit chunks to thread pool
     # ------------------------------------------------------------------
     t_read_start = time.perf_counter()
     rows_in_val: int = 0
-    all_clean_parts: List[pd.DataFrame] = []
+    rows_after_sampling_val: int = 0
+    rows_valid_val = 0
+    rows_rej_val = 0
+    amt_min_val = amt_mean_val = amt_median_val = amt_max_val = None
+    phys_val = hosp_val = 0
+    phys_missing_npi_val = phys_missing_prof_val = hosp_missing_id_val = 0
     futures_map: Dict = {}
+
+    running_min = float("inf")
+    running_max = float("-inf")
+    running_sum = 0.0
+    running_count = 0
 
     logging.info("[Phase 1] ── Stage 1/5: Submitting CSV chunks to thread pool ──")
 
@@ -241,28 +284,89 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
         chunk_idx = 0
         for fpath in cfg.input_files:
             source_file = Path(fpath).name if cfg.keep_source_file else ""
-            reader = pd.read_csv(
-                fpath,
-                dtype=str,
-                chunksize=cfg.chunk_size,
-                encoding="utf-8",
-            )
-            with _make_pbar(f"  Submitting chunks from {Path(fpath).name}", unit="chunk") as submit_bar:
-                for chunk_df in reader:
-                    rows_in_val += len(chunk_df)
-                    fut = pool.submit(
-                        _process_chunk,
-                        chunk_df,
-                        cfg,
-                        source_file,
-                        chunk_idx,
-                        do_sampling,
-                        sampling_stage,
-                    )
-                    futures_map[fut] = chunk_idx
-                    chunk_idx += 1
-                    if _HAS_TQDM and submit_bar is not None:
-                        submit_bar.update(1)
+
+            with open(fpath, "r", encoding="utf-8") as fh:
+                total_rows = sum(1 for _ in fh) - 1  # subtract header
+
+            if do_sampling and cfg.sampling_fraction < 0.9999:
+                rows_to_read = max(cfg.chunk_size, int(math.ceil(total_rows * cfg.sampling_fraction)))
+            else:
+                rows_to_read = None
+
+            if rows_to_read is not None:
+                sampling_strategy = "early_termination_nrows"
+
+            apply_chunk_sampling = do_sampling and rows_to_read is None
+
+            rows_in_file = 0
+
+            header_cols: List[str] = []
+            with open(fpath, "r", encoding="utf-8") as fh_header:
+                header_line = fh_header.readline().rstrip("\n")
+                if header_line:
+                    header_cols = next(csv.reader([header_line]))
+
+            if _HAS_PYARROW_CSV:
+                column_types = {name: pa.string() for name in header_cols}
+                pa_read_opts = pa_csv.ReadOptions(
+                    block_size=cfg.chunk_size * 150
+                )
+                pa_convert_opts = pa_csv.ConvertOptions(
+                    column_types=column_types
+                )
+                pa_reader = pa_csv.open_csv(
+                    fpath,
+                    read_options=pa_read_opts,
+                    convert_options=pa_convert_opts,
+                )
+
+                with _make_pbar(f"  Submitting chunks from {Path(fpath).name}", unit="chunk") as submit_bar:
+                    for batch in pa_reader:
+                        chunk_df = batch.to_pandas().astype(str)
+                        if rows_to_read is not None and rows_in_file >= rows_to_read:
+                            break
+                        rows_in_file += len(chunk_df)
+                        rows_in_val += len(chunk_df)
+                        fut = pool.submit(
+                            _process_chunk,
+                            chunk_df,
+                            cfg,
+                            source_file,
+                            chunk_idx,
+                            apply_chunk_sampling,
+                            sampling_stage,
+                            canon_semaphore,
+                        )
+                        futures_map[fut] = chunk_idx
+                        chunk_idx += 1
+                        if _HAS_TQDM and submit_bar is not None:
+                            submit_bar.update(1)
+            else:
+                logging.warning("[Phase 1] PyArrow CSV unavailable; falling back to pandas read_csv.")
+                reader = pd.read_csv(
+                    fpath,
+                    dtype=str,
+                    chunksize=cfg.chunk_size,
+                    nrows=rows_to_read,
+                    encoding="utf-8",
+                )
+                with _make_pbar(f"  Submitting chunks from {Path(fpath).name}", unit="chunk") as submit_bar:
+                    for chunk_df in reader:
+                        rows_in_val += len(chunk_df)
+                        fut = pool.submit(
+                            _process_chunk,
+                            chunk_df,
+                            cfg,
+                            source_file,
+                            chunk_idx,
+                            apply_chunk_sampling,
+                            sampling_stage,
+                            canon_semaphore,
+                        )
+                        futures_map[fut] = chunk_idx
+                        chunk_idx += 1
+                        if _HAS_TQDM and submit_bar is not None:
+                            submit_bar.update(1)
 
         total_chunks = chunk_idx
         logging.info(
@@ -275,105 +379,76 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
                 cidx = futures_map[fut]
                 try:
                     result = fut.result()
-                    all_clean_parts.append(result)
                 except Exception as exc:
                     logging.error("[Phase 1] Chunk %d failed: %s", cidx, exc)
                     raise
+                else:
+                    rows_after_sampling_val += len(result)
+                    if len(result) == 0:
+                        continue
+
+                    valid_df = result[result["is_valid"] == True].copy()
+                    rejected_df = result[result["is_valid"] == False].copy()
+
+                    rows_valid_val += len(valid_df)
+                    rows_rej_val += len(rejected_df)
+
+                    if cfg.compute_stats and len(valid_df) > 0:
+                        chunk_amounts = valid_df["amount_usd"].to_numpy(dtype="float64", na_value=float("nan"))
+                        valid_mask = ~np.isnan(chunk_amounts)
+                        if valid_mask.any():
+                            chunk_clean = chunk_amounts[valid_mask]
+                            running_min = min(running_min, float(chunk_clean.min()))
+                            running_max = max(running_max, float(chunk_clean.max()))
+                            running_sum += float(chunk_clean.sum())
+                            running_count += int(len(chunk_clean))
+
+                        phys_val += int((valid_df["payee_type"] == "physician").sum())
+                        hosp_val += int((valid_df["payee_type"] == "teaching_hospital").sum())
+                        phys_rows = valid_df[valid_df["payee_type"] == "physician"]
+                        hosp_rows = valid_df[valid_df["payee_type"] == "teaching_hospital"]
+                        phys_missing_npi_val += int(phys_rows["physician_npi"].isna().sum())
+                        phys_missing_prof_val += int(phys_rows["physician_profile_id"].isna().sum())
+                        hosp_missing_id_val += int(hosp_rows["teaching_hospital_id"].isna().sum())
+
+                    valid_df = sanitize_for_parquet(valid_df)
+                    if len(valid_df) > 0:
+                        _write_parquet_part(valid_df, clean_dir, cidx)
+
+                    if not cfg.skip_rejected:
+                        rejected_df = sanitize_for_parquet(rejected_df)
+                        if len(rejected_df) > 0:
+                            _write_parquet_part(rejected_df, rej_dir, cidx)
                 finally:
                     if _HAS_TQDM and done_bar is not None:
                         done_bar.update(1)
 
     timings["t_read_and_canon"] = round(time.perf_counter() - t_read_start, 4)
     logging.info(
-        "[Phase 1] Stage 2 done | parts=%d | elapsed=%.2fs",
-        len(all_clean_parts), timings["t_read_and_canon"],
+        "[Phase 1] Stage 2 done | rows_in=%d rows_after_sampling=%d | elapsed=%.2fs",
+        rows_in_val, rows_after_sampling_val, timings["t_read_and_canon"],
     )
 
-    # ------------------------------------------------------------------
-    # Stage 3 – Concatenate all cleaned parts
-    # ------------------------------------------------------------------
-    logging.info("[Phase 1] ── Stage 3/5: Concatenating %d parts ──", len(all_clean_parts))
-    t_concat_start = time.perf_counter()
-    if all_clean_parts:
-        canon_full = pd.concat(all_clean_parts, ignore_index=True)
-    else:
-        canon_full = make_canonical_meta(cfg)
-    timings["t_concat"] = round(time.perf_counter() - t_concat_start, 4)
-    logging.info(
-        "[Phase 1] Stage 3 done | total_rows=%d | elapsed=%.2fs",
-        len(canon_full), timings["t_concat"],
-    )
-
-    rows_after_sampling_val = len(canon_full)
-
-    valid_df    = canon_full[canon_full["is_valid"] == True].copy()
-    rejected_df = canon_full[canon_full["is_valid"] == False].copy()
+    if rows_valid_val == 0:
+        empty_valid = sanitize_for_parquet(make_canonical_meta(cfg))
+        _write_parquet_part(empty_valid, clean_dir, 0)
+    if not cfg.skip_rejected and rows_rej_val == 0:
+        empty_rej = sanitize_for_parquet(make_canonical_meta(cfg))
+        _write_parquet_part(empty_rej, rej_dir, 0)
 
     # ------------------------------------------------------------------
-    # Stage 4 – Sanitise for Parquet and write
+    # Stage 3 – Compute summary statistics
     # ------------------------------------------------------------------
-    logging.info(
-        "[Phase 1] ── Stage 4/5: Sanitising | valid=%d rejected=%d ──",
-        len(valid_df), len(rejected_df),
-    )
-    t_sanitize_start = time.perf_counter()
-    valid_df = sanitize_for_parquet(valid_df)
-    if not cfg.skip_rejected:
-        rejected_df = sanitize_for_parquet(rejected_df)
-    timings["t_sanitize"] = round(time.perf_counter() - t_sanitize_start, 4)
-    logging.info("[Phase 1] Sanitisation done | elapsed=%.2fs", timings["t_sanitize"])
-
-    t_write_start = time.perf_counter()
-    logging.info("[Phase 1] Writing clean dataset (%d rows)...", len(valid_df))
-    _write_parquet_partitioned(valid_df, clean_dir, cfg.chunk_size)
-    timings["t_write_parquet_valid"] = round(time.perf_counter() - t_write_start, 4)
-    logging.info(
-        "[Phase 1] Clean parquet written | elapsed=%.2fs", timings["t_write_parquet_valid"]
-    )
-
-    if not cfg.skip_rejected:
-        t_write_rej = time.perf_counter()
-        logging.info("[Phase 1] Writing rejected dataset (%d rows)...", len(rejected_df))
-        _write_parquet_partitioned(rejected_df, rej_dir, cfg.chunk_size)
-        timings["t_write_parquet_rejected"] = round(time.perf_counter() - t_write_rej, 4)
-        logging.info(
-            "[Phase 1] Rejected parquet written | elapsed=%.2fs",
-            timings["t_write_parquet_rejected"],
-        )
-
-    # ------------------------------------------------------------------
-    # Stage 5 – Compute summary statistics
-    # ------------------------------------------------------------------
-    rows_valid_val = rows_rej_val = 0
-    amt_min_val = amt_mean_val = amt_median_val = amt_max_val = None
-    phys_val = hosp_val = 0
-    phys_missing_npi_val = phys_missing_prof_val = hosp_missing_id_val = 0
-
-    logging.info("[Phase 1] ── Stage 5/5: Computing statistics ──")
+    logging.info("[Phase 1] ── Stage 3/5: Computing statistics ──")
     if cfg.compute_stats:
         t_stats_start = time.perf_counter()
-        rows_valid_val = len(valid_df)
-        rows_rej_val   = len(rejected_df) if not cfg.skip_rejected else 0
-
-        if rows_valid_val:
-            amt = pd.to_numeric(valid_df["amount_usd"], errors="coerce")
-            amt_min_val  = float(amt.min())
-            amt_mean_val = float(amt.mean())
-            amt_max_val  = float(amt.max())
-            if cfg.stats_compute_median:
-                amt_median_val = float(amt.median())
-
-            phys_val = int((valid_df["payee_type"] == "physician").sum())
-            hosp_val = int((valid_df["payee_type"] == "teaching_hospital").sum())
-
-            if phys_val:
-                phys_rows = valid_df[valid_df["payee_type"] == "physician"]
-                phys_missing_npi_val  = int(phys_rows["physician_npi"].isna().sum())
-                phys_missing_prof_val = int(phys_rows["physician_profile_id"].isna().sum())
-            if hosp_val:
-                hosp_rows = valid_df[valid_df["payee_type"] == "teaching_hospital"]
-                hosp_missing_id_val = int(hosp_rows["teaching_hospital_id"].isna().sum())
-
+        if running_count > 0:
+            amt_min_val = running_min
+            amt_max_val = running_max
+            amt_mean_val = running_sum / running_count
+            amt_median_val = None
+        else:
+            amt_min_val = amt_max_val = amt_mean_val = amt_median_val = None
         timings["t_stats"] = round(time.perf_counter() - t_stats_start, 4)
 
     total_time = time.perf_counter() - t_phase_start
@@ -416,7 +491,7 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
             "seed":     cfg.sampling_seed,
             "method":   cfg.sampling_method,
             "enabled":  cfg.sampling_fraction < 0.9999,
-            "strategy": "head_slice_first_x_percent",
+            "strategy": sampling_strategy,
         },
         "stats_config": {
             "compute_stats":    bool(cfg.compute_stats),
@@ -431,11 +506,7 @@ def run(cfg: CleanConfig, config_path: Optional[str] = None) -> None:
             "use_numba":    cfg.use_numba,
             "has_numba":    bool(_HAS_NUMBA),
             "chunk_size":   cfg.chunk_size,
-            "max_workers":  cfg.max_workers,
-        },
-        "outputs": {
-            "payments_clean_dir":    str(clean_dir),
-            "payments_rejected_dir": str(rej_dir) if not cfg.skip_rejected else None,
+            "max_workers":  max_workers,
         },
         "generated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -557,13 +628,17 @@ def run_from_pipeline(
             "use_pandas_if_rows_lt": cfg.stats_pandas_threshold,
         },
     }
-    cfg_path = out_dir / "config_from_pipeline.yaml"
-    with open(cfg_path, "w", encoding="utf-8") as f:
+    tmp_cfg_path = out_dir / "config_used_tmp.yaml"
+    with open(tmp_cfg_path, "w", encoding="utf-8") as f:
         yaml.safe_dump(cfg_snapshot, f)
 
     start_ts = datetime.now(timezone.utc).isoformat()
     t0 = time.perf_counter()
-    run(cfg, config_path=str(cfg_path))
+    try:
+        run(cfg, config_path=str(tmp_cfg_path))
+    finally:
+        if tmp_cfg_path.exists():
+            tmp_cfg_path.unlink()
     wall = time.perf_counter() - t0
     end_ts = datetime.now(timezone.utc).isoformat()
 

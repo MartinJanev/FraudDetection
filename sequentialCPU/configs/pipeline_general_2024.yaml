@@ -19,7 +19,7 @@ phase1_clean:
   keep_source_file: true
   skip_rejected: true
   sampling:
-    fraction: 0.6  # options for experiments: 0.01 (1%), 0.05 (5%), 0.10 (10%), 0.25 (25%), 1.0 (full dataset)
+    fraction: 0.4 # options for experiments: 0.01 (1%), 0.05 (5%), 0.10 (10%), 0.25 (25%), 1.0 (full dataset)
     seed: 42
 
 phase2_graph:

@@ -283,11 +283,6 @@ def run_once(
         "reports": run_dir / "reports",
     }
     ensure_dirs(list(phase_dirs.values()))
-    print(f"[{run_id}] Outputs -> {run_dir}", flush=True)
-
-    cfg_snapshot_path = phase_dirs["reports"] / "config_snapshot.yaml"
-    with open(cfg_snapshot_path, "w", encoding="utf-8") as f:
-        yaml.safe_dump(pipeline_cfg, f)
 
     timings = {}
     phase_reports = []
@@ -306,7 +301,7 @@ def run_once(
     )
     timings["phase1_clean"] = time.perf_counter() - t0
     print(f"[{run_id}] Finished phase1_clean in {timings['phase1_clean']:.2f}s", flush=True)
-    print(f"[{run_id}] Clean output -> {clean_res['artifacts'].get('clean_dir')}", flush=True)
+    phase_reports.append(clean_res)
 
     clean_manifest_val = None
     if clean_res.get("artifacts"):
@@ -330,7 +325,7 @@ def run_once(
     )
     timings["phase2_graph"] = time.perf_counter() - t0
     print(f"[{run_id}] Finished phase2_graph in {timings['phase2_graph']:.2f}s", flush=True)
-    print(f"[{run_id}] Graph output -> {graph_res['artifacts'].get('edges')}", flush=True)
+    phase_reports.append(graph_res)
 
     # Phase 3: algorithms
     print(f"[{run_id}] Starting phase3_algos", flush=True)
@@ -366,14 +361,27 @@ def run_once(
     print(f"[{run_id}] Pipeline done in {timings['total']:.2f}s", flush=True)
 
     timings_path = phase_dirs["reports"] / "timings.json"
+    phase_reports_public = [
+        {k: v for k, v in report.items() if k != "artifacts"}
+        for report in phase_reports
+    ]
     run_report = {
         "run_id": run_id,
         "dataset": dataset_name,
         "approach": approach,
         "start_utc": phase_reports[0].get("start_utc"),
         "end_utc": phase_reports[-1].get("end_utc"),
-        "phase_reports": phase_reports,
+        "phase_reports": phase_reports_public,
         "timings_sec": timings,
+        "execution": {
+            "max_workers": pipeline_cfg.get("execution", {}).get("max_workers", 0),
+            "use_numba": bool(
+                pipeline_cfg.get("phase1_clean", {}).get("use_numba", True)
+                or pipeline_cfg.get("phase4_score", {}).get("use_numba", True)
+            ),
+            "has_numba": bool(_HAS_NUMBA),
+            "chunk_size": pipeline_cfg.get("phase1_clean", {}).get("chunk_size"),
+        },
     }
     with open(timings_path, "w", encoding="utf-8") as f:
         json.dump(run_report, f, indent=2)
@@ -446,7 +454,6 @@ def main() -> None:
         f"runs={runs}",
         f"approach={args.approach}",
         f"max_workers={max_workers}",
-        f"output_root={out_root}",
         sep=" | ",
         flush=True,
     )
@@ -515,9 +522,9 @@ def main() -> None:
             writer.writeheader()
             writer.writerows(warmup_filtered)
 
-    print(f"Completed {len(rows)} run(s). Results under {out_root}")
-    print(f"Aggregate timings: {timing_csv}")
-    print(f"Summary: {timing_summary}")
+    print(f"Completed {len(rows)} run(s).")
+    print("Aggregate timings updated.")
+    print("Summary updated.")
 
     for r in rows:
         cleanup_intermediate_data(out_root / r["run_id"])

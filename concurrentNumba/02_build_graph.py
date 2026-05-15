@@ -357,8 +357,6 @@ def run(cfg: GraphBuildConfig) -> None:
 
     total_time = time.perf_counter() - t0
     report = {
-        "inputs": {"clean_dir": str(clean_dir)},
-        "outputs": {"edges_path": str(edges_path), "nodes_path": str(nodes_path)},
         "counts": {
             "edges": edges_count,
             "total_nodes": nodes_count,
