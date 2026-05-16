@@ -1,53 +1,5 @@
-dataset:
-  name: general_2024
-  payment_type: general
-  program_year: 2024
-
-inputs:
-  csv_files:
-    - ../../CMS_Open_Payements2024/2024GeneralPayements.csv
-
-output:
-  root_dir: output
+base_config: ../../configs/pipeline_general_2024_base.yaml
 
 runs:
   n_runs: 5
 
-phase1_clean:
-  chunk_size: 500000
-  write_format: parquet
-  keep_source_file: true
-  skip_rejected: true
-  sampling:
-    fraction: 0.4 # options for experiments: 0.01 (1%), 0.05 (5%), 0.10 (10%), 0.25 (25%), 1.0 (full dataset)
-    seed: 42
-
-phase2_graph:
-  payer_id_col: payer_id
-  payer_name_norm_col: payer_name_norm
-  payee_key_col: payee_key
-  amount_col: amount_usd
-  date_col: payment_date
-  min_edge_weight: 0.0
-
-phase3_algos:
-  pagerank_alpha: 0.85
-  pagerank_tol: 1.0e-6
-  pagerank_max_iter: 100
-  compute_components: true
-
-phase4_score:
-  top_k: 200
-  score_node_types: [physician, teaching_hospital]
-  method: robust_z_logsum
-  eps: 1.0e-9
-  w_in_w: 0.40
-  w_in_deg: 0.15
-  w_out_w: 0.05
-  w_out_deg: 0.10
-  use_pagerank: true
-  w_pagerank: 0.20
-  use_components: true
-  w_component: 0.10
-  min_in_w: 0.0
-  min_in_deg: 0

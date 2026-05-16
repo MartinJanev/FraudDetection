@@ -92,12 +92,42 @@ def resolve_path_maybe(base: Path, p: str) -> Path:
     return path_obj.resolve()
 
 
-def load_pipeline_config(path: Path) -> Dict:
+def _deep_merge_dicts(base: Dict, override: Dict) -> Dict:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge_dicts(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _read_yaml_config(path: Path) -> Dict:
     with open(path, "r", encoding="utf-8") as f:
-        cfg = yaml.safe_load(f)
-    cfg = cfg or {}
-    cfg["__config_dir"] = str(path.parent.resolve())
-    return cfg
+        return yaml.safe_load(f) or {}
+
+
+def load_pipeline_config(path: Path) -> Dict:
+    cfg = _read_yaml_config(path)
+    cfg_dir = path.parent.resolve()
+
+    base_paths = cfg.get("base_config") or cfg.get("base_configs")
+    merged: Dict = {}
+    if base_paths:
+        if isinstance(base_paths, (str, Path)):
+            base_paths = [base_paths]
+        for base_path in base_paths:
+            base_path = Path(base_path)
+            if not base_path.is_absolute():
+                base_path = cfg_dir / base_path
+            base_cfg = _read_yaml_config(base_path)
+            merged = _deep_merge_dicts(merged, base_cfg)
+
+    merged = _deep_merge_dicts(merged, cfg)
+    merged.pop("base_config", None)
+    merged.pop("base_configs", None)
+    merged["__config_dir"] = str(cfg_dir)
+    return merged
 
 
 def ensure_dirs(paths: List[Path]) -> None:
