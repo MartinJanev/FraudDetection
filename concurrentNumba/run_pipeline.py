@@ -431,6 +431,7 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=None, help="Number of runs to execute (overrides config)")
     parser.add_argument("--max-workers", type=int, default=None,
                         help="Global CPU concurrency. Overrides YAML execution.max_workers if set.")
+    parser.add_argument("--sampling-fraction", type=float, default=None, help="Override phase1_clean.sampling.fraction (0.0-1.0)")
     parser.add_argument("--log-level", default="INFO")
     args = parser.parse_args()
 
@@ -439,6 +440,12 @@ def main() -> None:
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     pipeline_cfg = load_pipeline_config(config_path)
+    if args.sampling_fraction is not None:
+        if not 0.0 <= args.sampling_fraction <= 1.0:
+            raise ValueError("--sampling-fraction must be between 0.0 and 1.0")
+        pipeline_cfg.setdefault("phase1_clean", {}).setdefault("sampling", {})["fraction"] = float(
+            args.sampling_fraction
+        )
 
     pipeline_cfg.setdefault("execution", {})
     yaml_workers = pipeline_cfg["execution"].get("max_workers")

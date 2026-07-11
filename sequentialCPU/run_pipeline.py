@@ -366,6 +366,7 @@ def main() -> None:
     parser.add_argument("--runs", type=int, default=None, help="Number of runs to execute (overrides config)")
     parser.add_argument("--phases", default="phase1_clean,phase2_graph,phase3_algos,phase4_score", help="Comma-separated phases to run")
     parser.add_argument("--reuse-run-dir", default=None, help="Existing run directory to reuse (skip generating new run_id)")
+    parser.add_argument("--sampling-fraction", type=float, default=None, help="Override phase1_clean.sampling.fraction (0.0-1.0)")
     parser.add_argument("--log-level", default="INFO", help="Unused placeholder for future logging")
     args = parser.parse_args()
 
@@ -374,6 +375,13 @@ def main() -> None:
         raise FileNotFoundError(f"Config not found: {config_path}")
 
     pipeline_cfg = load_pipeline_config(config_path)
+    if args.sampling_fraction is not None:
+        if not 0.0 <= args.sampling_fraction <= 1.0:
+            raise ValueError("--sampling-fraction must be between 0.0 and 1.0")
+        pipeline_cfg.setdefault("phase1_clean", {}).setdefault("sampling", {})["fraction"] = float(
+            args.sampling_fraction
+        )
+
     dataset_cfg = pipeline_cfg.get("dataset", {})
     dataset_name = str(dataset_cfg.get("name") or dataset_cfg.get("dataset_name") or "dataset")
 
